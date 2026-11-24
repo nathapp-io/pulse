@@ -114,8 +114,15 @@ viewer Ingress behind Traefik with TLS.
 - DB tests on a temp SQLite file: migration idempotency, dedupe, rollup math, retention.
 - `go test -race ./...`; one compose smoke test covering M2's acceptance list.
 
+## Settled inputs
+
+- Scale: **under 100 targets** (D6) — ~3.3 results/s, so M2's acceptance numbers are the
+  real ones: single writer, 7d raw ≈ 250 MB, 100 targets < 60 MB RSS in the prober.
+  No milestone needs sharding, partitioning or a real TSDB.
+- Prober `/metrics`: kept on a separate port, unused by the viewer.
+
 ## Still needed before M1
 
-1. Scale expectation (~10 / ~100 / ~1000 targets) — sets defaults.
-2. Keep the prober's `/metrics` (assumed yes, separate port)?
-3. Repo home / remote.
+1. A Go toolchain: neither `go` nor `rustc` exists on this machine. Either
+   `brew install go` (needs network) or build in the `golang:1.24` container.
+2. Repo home / remote (local-only is fine until M5).

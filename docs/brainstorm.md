@@ -126,10 +126,16 @@ build container.
 - Optional `GET /metrics` so the viewer itself can be scraped.
 - UI: static assets embedded, uPlot vendored, no CDN.
 
-### 5.4 Storage sizing (viewer)
-At 100 targets × 30s intervals: 288k results/day. Raw rows ~100–150 B → ~30–40 MB/day,
-so **7 days ≈ 250 MB**. Rollups are negligible (~1000× fewer rows). All retention is
-configurable; a 30s→60s interval halves it.
+### 5.4 Storage sizing (viewer) — scale is settled at under 100 targets (D6)
+At 100 targets × 30s intervals: 288k results/day, i.e. **~3.3 writes/second**. Raw rows
+~100–150 B → ~30–40 MB/day, so **7 days ≈ 250 MB**; rollups are negligible (~1000× fewer
+rows). All retention is configurable and a 30s→60s interval halves it.
+
+Under 100 targets, that volume is small enough to make several things deliberately
+simple: **one** SQLite writer goroutine with batched inserts (no pooling, no partitioning,
+no sharding), plain `DELETE ... WHERE ts < ?` retention instead of a job queue, and whole
+`/api/v1/status` responses assembled in memory. The design still carries headroom to a few
+hundred targets unchanged, so growth is not a rewrite — just stop batching so aggressively.
 
 ### 5.5 Contracts
 
@@ -227,6 +233,7 @@ gRPC probes, PromQL backend, multi-tenant, SLA reports/exports.
 | D3 | **History in the viewer** (SQLite) | Probers become disposable and stateless-ish; one history for N probers; a prober restart loses nothing; no per-prober volume to back up |
 | D4 | Basic auth from env | Simplest thing that is not "no auth"; OIDC later |
 | D5 | Placement decided per deployment | Prober name/labels travel in the payload, so nothing assumes a topology |
+| D6 | **Under 100 targets** | ~3.3 probe results/s: one SQLite writer + batched inserts, in-memory status assembly, simple retention. Keeps the whole stack in tens of MB of RAM and ~250 MB of disk |
 
 D3 in more detail: the prober could keep history, but then the viewer would have to
 **pull** it (contradicting D2), or each prober would keep its own history and the viewer
@@ -236,10 +243,11 @@ for its own `/metrics` (~20 KB/target), and that is explicitly *not* the source 
 
 ## 12. Open questions
 
-1. **`/metrics` on the prober — keep or drop?** Assumed kept, on a separate port, for a
+None of these block M1/M2 — defaults are in the config examples and are cheap to change.
+
+1. **`/metrics` on the prober — keep or drop?** Assumed **kept**, on a separate port, for a
    future Prometheus; the viewer never uses it. Say the word and it becomes opt-in.
-2. **Scale** — roughly 10, 100 or 1000 targets? Sets ring-buffer/queue/retention defaults
-   and whether SQLite needs the batching writer in M2 or later.
-3. **Retention** — happy with raw 7d / 1m 30d / 1h 365d?
-4. **Ingest token** — one shared token for v1 (assumed), or per-prober from the start?
-5. **Repo home** — Resolved: public GitHub repository `nathapp-io/pulse`.
+2. **Retention** — assuming raw 7d / 1m 30d / 1h 365d. At <100 targets this holds under
+   ~250 MB, which is why the default is generous.
+3. **Ingest token** — one shared token for v1 (assumed), per-prober tokens in M4.
+4. **Repo home** — Resolved: public GitHub repository `nathapp-io/pulse`.

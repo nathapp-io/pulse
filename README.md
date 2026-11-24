@@ -42,6 +42,7 @@ Design phase — **no application code yet**. Decisions taken 2026-11-16:
 | D3 | **History lives in the viewer** (SQLite). Prober keeps only live state + uptime buckets. |
 | D4 | Viewer auth: **HTTP Basic from env** (`PULSE_AUTH_USER` / `PULSE_AUTH_PASSWORD`). |
 | D5 | Prober placement is a deployment-time decision; nothing in the design assumes it. |
+| D6 | Scale: **under 100 targets** — one SQLite writer, batched inserts, simple retention. |
 
 See [`docs/brainstorm.md`](docs/brainstorm.md) for the reasoning, contracts and risks,
 [`docs/plan.md`](docs/plan.md) for milestones, and
