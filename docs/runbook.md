@@ -21,9 +21,35 @@ helm upgrade --install pulse deploy/helm/pulse -n monitoring --create-namespace 
 ```
 
 Images: CI publishes `ghcr.io/nathapp-io/pulse/viewer` and `.../prober` on every push
-to `main` (`latest`) and on every release tag. If the packages are private, create a pull
-secret and set `imagePullSecrets`, otherwise the pods sit in `ImagePullBackOff`. Pin a
-version in production rather than tracking `latest`.
+to `main` (`latest`) and on every release tag, using the run's own `GITHUB_TOKEN` (the job
+declares `packages: write`) — no personal token and no repository secret is involved.
+
+**New ghcr packages are created private even when the repository is public**, so an
+open-source deployment has to flip them once. That is deliberate on GitHub's part and not
+something CI can do for you: the workflow token can push but cannot change visibility.
+After flipping, no pull secret is needed and the chart's defaults work as-is.
+
+```sh
+# one click each, or from the API with a token that has the package scope:
+#   gh auth refresh -s read:packages,write:packages
+#   https://github.com/orgs/nathapp-io/packages/container/pulse%2Fprober/settings
+gh api --method PATCH /orgs/nathapp-io/packages/container/pulse%2Fprober  -f visibility=public
+gh api --method PATCH /orgs/nathapp-io/packages/container/pulse%2Fviewer  -f visibility=public
+```
+
+Verify, and see both architectures while you are there:
+
+```sh
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:nathapp-io/pulse/prober:pull&service=ghcr.io" \
+  | jq -r .token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  https://ghcr.io/v2/nathapp-io/pulse/prober/manifests/latest | jq '[.manifests[].platform]'
+```
+
+An empty or missing token means the package is still private. `imagePullSecrets` remains
+for private forks, mirrored registries, and air-gapped installs. Pin a version rather than
+tracking `latest` in production.
 
 Set before the first deploy, or you will get an error by design:
 

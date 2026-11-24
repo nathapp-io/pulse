@@ -7,7 +7,7 @@
 # The viewer is a single writer. With the sqlite store, replicas must stay at 1:
 # two pods on a ReadWriteOnce volume would corrupt each other's history.
 
-# Pull secret(s) for private registry packages, applied to both workloads.
+# Only needed for a private registry or mirror: the published packages are public.
 imagePullSecrets: []
 
 viewer:

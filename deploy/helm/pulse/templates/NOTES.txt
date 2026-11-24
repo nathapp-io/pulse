@@ -34,6 +34,7 @@ Revoking a prober token: edit the tokens file/Secret -- no restart and no new
 `helm upgrade` is needed. See docs/runbook.md.
 
 {{- if not .Values.imagePullSecrets }}
-NOTE: if the packages at {{ .Values.viewer.image.repository }} are private, create a
-pull secret and set imagePullSecrets, or the pods will sit in ImagePullBackOff.
+NOTE: these images are public for an open-source install, so no pull secret is needed.
+If you mirrored them to a private registry, set imagePullSecrets -- otherwise the pods
+will sit in ImagePullBackOff.
 {{- end }}

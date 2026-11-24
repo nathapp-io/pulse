@@ -117,6 +117,10 @@ helm upgrade --install pulse deploy/helm/pulse -n monitoring --create-namespace 
   --set viewer.auth.password='...' -f my-values.yaml
 ```
 
+CI publishes multi-arch (`amd64`, `arm64`) images to
+`ghcr.io/nathapp-io/pulse/{viewer,prober}`. If they are still private after the first
+push, see the runbook — one click makes them public, and then no pull secret is needed.
+
 The chart refuses to render when the configuration would silently lose history
 (`sqlite` with more than one viewer replica, or persistence enabled with the `memory`
 store). Operations, triage and rotation procedures are in
