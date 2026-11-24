@@ -153,13 +153,14 @@ func (m *memoryStore) Snapshot(_ context.Context) (Snapshot, error) {
 
 	for _, t := range m.targets {
 		ts := TargetState{
-			Spec:    t.spec,
-			Prober:  t.prober,
-			State:   t.state,
-			Since:   t.since,
-			Last:    t.last,
-			Uptime:  make(map[string]float64, len(UptimeWindows)),
-			Latency: Percentiles(recentDurations(t.points)),
+			Spec:        t.spec,
+			Prober:      t.prober,
+			State:       t.state,
+			Since:       t.since,
+			Last:        t.last,
+			Maintenance: t.last.Maintenance,
+			Uptime:      make(map[string]float64, len(UptimeWindows)),
+			Latency:     Percentiles(recentDurations(t.points)),
 		}
 		for _, w := range UptimeWindows {
 			if r := t.buckets.Ratio(w.D); r >= 0 {

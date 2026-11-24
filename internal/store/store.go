@@ -109,13 +109,17 @@ type ProberState struct {
 
 // TargetState is one target's latest health, history aggregates included.
 type TargetState struct {
-	Spec    model.TargetSpec
-	Prober  string
-	State   string
-	Since   time.Time
-	Last    model.Result
-	Uptime  map[string]float64
-	Latency map[string]int64
+	Spec   model.TargetSpec
+	Prober string
+	State  string
+	Since  time.Time
+	Last   model.Result
+	// Maintenance is true when the latest sample was taken inside a maintenance
+	// window, so a viewer can show the target differently without touching the
+	// recorded result.
+	Maintenance bool
+	Uptime      map[string]float64
+	Latency     map[string]int64
 }
 
 // Percentiles computes p50/p95 from raw durations, in milliseconds.

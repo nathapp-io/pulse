@@ -57,6 +57,7 @@
       item("up", s.up, "up-text"),
       item("down", s.down, "down-text"),
       item("stale", s.stale, "stale-text"),
+      item("maint", s.maintenance, "maint-text"),
       item("unknown", s.unknown),
       item("targets", s.targets),
       item("probers", s.probers),
@@ -106,6 +107,9 @@
       const failure = t.last && !t.last.ok
         ? `<p class="error">${escapeHTML(t.last.error_class || "error")}: ${escapeHTML(t.last.error || "")}</p>`
         : "";
+      const planned = t.maintenance
+        ? `<p class="planned">planned maintenance — recorded, not alarmed</p>`
+        : "";
       return `<article class="card ${state}" data-target="${escapeHTML(t.name)}" tabindex="0"
                        role="button" aria-label="Show history for ${escapeHTML(t.name)}">
         <header>
@@ -120,6 +124,7 @@
           <span>${escapeHTML(t.prober)}</span>
         </div>
         ${failure}
+        ${planned}
       </article>`;
     }).join("");
   }

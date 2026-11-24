@@ -150,7 +150,7 @@ func main() {
 
 		if pusher != nil {
 			currentState, _ := rt.machine.Snapshot()
-			pusher.Enqueue(toModelResult(res, currentState))
+			pusher.Enqueue(toModelResult(res, currentState, rt.cfg.InMaintenance(res.At)))
 			if changed {
 				// A state change must reach the viewer in seconds, not at the
 				// next batch interval.
@@ -324,16 +324,17 @@ func configHash(path string) string {
 
 // toModelResult converts an internal probe result into the wire format, carrying
 // the damped state so the viewer never has to re-derive flap policy.
-func toModelResult(res probe.Result, st state.State) model.Result {
+func toModelResult(res probe.Result, st state.State, maintenance bool) model.Result {
 	out := model.Result{
-		Target:     res.Target,
-		At:         res.At,
-		OK:         res.OK,
-		State:      string(st),
-		DurationMS: res.DurationMS,
-		StatusCode: res.StatusCode,
-		ErrorClass: string(res.ErrorClass),
-		Error:      res.Error,
+		Target:      res.Target,
+		At:          res.At,
+		OK:          res.OK,
+		State:       string(st),
+		Maintenance: maintenance,
+		DurationMS:  res.DurationMS,
+		StatusCode:  res.StatusCode,
+		ErrorClass:  string(res.ErrorClass),
+		Error:       res.Error,
 	}
 	if len(res.PhaseMS) > 0 {
 		out.PhaseMS = make(map[string]int64, len(res.PhaseMS))

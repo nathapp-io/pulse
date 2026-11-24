@@ -71,6 +71,7 @@ type Summary struct {
 	Down           int `json:"down"`
 	Stale          int `json:"stale"`
 	Unknown        int `json:"unknown"`
+	Maintenance    int `json:"maintenance"`
 	Probers        int `json:"probers"`
 	ProbersStale   int `json:"probers_stale"`
 	ProbersMissing int `json:"probers_missing"`
@@ -89,16 +90,19 @@ type Prober struct {
 
 // Target is one target's health as the viewer sees it.
 type Target struct {
-	Name      string             `json:"name"`
-	Group     string             `json:"group"`
-	Type      string             `json:"type"`
-	Prober    string             `json:"prober"`
-	State     string             `json:"state"` // UP | DOWN | UNKNOWN | STALE
-	Since     time.Time          `json:"since"`
-	Stale     bool               `json:"stale"`
-	Last      *model.Result      `json:"last,omitempty"`
-	Uptime    map[string]float64 `json:"uptime,omitempty"`
-	LatencyMS map[string]int64   `json:"latency_ms,omitempty"`
+	Name   string    `json:"name"`
+	Group  string    `json:"group"`
+	Type   string    `json:"type"`
+	Prober string    `json:"prober"`
+	State  string    `json:"state"` // UP | DOWN | UNKNOWN | STALE | MAINTENANCE
+	Since  time.Time `json:"since"`
+	Stale  bool      `json:"stale"`
+	// Maintenance is set when the target's latest result was taken inside a
+	// declared maintenance window: still recorded, no longer counted as DOWN.
+	Maintenance bool               `json:"maintenance,omitempty"`
+	Last        *model.Result      `json:"last,omitempty"`
+	Uptime      map[string]float64 `json:"uptime,omitempty"`
+	LatencyMS   map[string]int64   `json:"latency_ms,omitempty"`
 }
 
 // Status builds the current view.
@@ -162,18 +166,23 @@ func (v *Viewer) Status(ctx context.Context) (Status, error) {
 		}
 		if stale {
 			state = "STALE"
+		} else if t.Maintenance {
+			// A planned outage is not a failure. The raw result is still stored
+			// and visible in history, so nothing is hidden -- only not alarmed on.
+			state = "MAINTENANCE"
 		}
 
 		entry := Target{
-			Name:      t.Spec.Name,
-			Group:     t.Spec.Group,
-			Type:      t.Spec.Type,
-			Prober:    t.Prober,
-			State:     state,
-			Since:     t.Since,
-			Stale:     stale,
-			Uptime:    t.Uptime,
-			LatencyMS: t.Latency,
+			Name:        t.Spec.Name,
+			Group:       t.Spec.Group,
+			Type:        t.Spec.Type,
+			Prober:      t.Prober,
+			State:       state,
+			Since:       t.Since,
+			Stale:       stale,
+			Maintenance: t.Maintenance,
+			Uptime:      t.Uptime,
+			LatencyMS:   t.Latency,
 		}
 		if !t.Last.At.IsZero() {
 			last := t.Last
@@ -188,6 +197,8 @@ func (v *Viewer) Status(ctx context.Context) (Status, error) {
 			st.Summary.Down++
 		case "STALE":
 			st.Summary.Stale++
+		case "MAINTENANCE":
+			st.Summary.Maintenance++
 		default:
 			st.Summary.Unknown++
 		}

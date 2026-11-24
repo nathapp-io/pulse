@@ -41,6 +41,10 @@ type Result struct {
 	ErrorClass string           `json:"error_class"`
 	Error      string           `json:"error,omitempty"`
 	TLSExpiry  *time.Time       `json:"tls_expiry,omitempty"`
+	// Maintenance marks a result taken while the target was inside one of its
+	// maintenance windows. The raw OK stays truthful; the flag lets the viewer
+	// stop counting the target as DOWN without rewriting history.
+	Maintenance bool `json:"maintenance,omitempty"`
 }
 
 // Batch is one push from a prober: the full target list plus new results.

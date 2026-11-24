@@ -122,3 +122,64 @@ func TestHistoryDefaultsToOneHour(t *testing.T) {
 		t.Fatalf("results = %d, want 1 (default window is 1h)", len(results))
 	}
 }
+
+func TestMaintenanceIsNotCountedAsDown(t *testing.T) {
+	v, now := newTestViewer(t, Config{StaleAfter: time.Minute})
+
+	b := model.Batch{
+		Prober:  model.ProberInfo{Name: "prober-a", Version: "test"},
+		Targets: []model.TargetSpec{{Name: "api", Group: "web", Type: "http"}},
+		Results: []model.Result{{
+			Target: "api", At: *now, OK: false, State: "DOWN", ErrorClass: "CONNECT_REFUSED",
+			Error: "connection refused", Maintenance: true,
+		}},
+	}
+	if _, err := v.Ingest(context.Background(), b); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	st, err := v.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got := st.Targets[0].State; got != "MAINTENANCE" {
+		t.Fatalf("state = %q, want MAINTENANCE (a planned outage is not a failure)", got)
+	}
+	if !st.Targets[0].Maintenance {
+		t.Fatal("target was not marked as in maintenance")
+	}
+	if st.Summary.Down != 0 {
+		t.Fatalf("summary down = %d, want 0 during maintenance", st.Summary.Down)
+	}
+	if st.Summary.Maintenance != 1 {
+		t.Fatalf("summary maintenance = %d, want 1", st.Summary.Maintenance)
+	}
+	// The failure is still recorded, so nothing is hidden from history.
+	if last := st.Targets[0].Last; last == nil || last.OK || !last.Maintenance {
+		t.Fatalf("last result = %+v, want a recorded failure flagged as maintenance", last)
+	}
+}
+
+func TestStaleOutranksMaintenance(t *testing.T) {
+	v, now := newTestViewer(t, Config{StaleAfter: 10 * time.Second})
+
+	b := model.Batch{
+		Prober:  model.ProberInfo{Name: "prober-a", Version: "test"},
+		Targets: []model.TargetSpec{{Name: "api"}},
+		Results: []model.Result{{Target: "api", At: *now, OK: false, State: "DOWN", Maintenance: true}},
+	}
+	if _, err := v.Ingest(context.Background(), b); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// The prober has gone silent: freshness is the more important fact, so the
+	// target is STALE rather than "planned maintenance, all fine".
+	*now = now.Add(5 * time.Minute)
+	st, err := v.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got := st.Targets[0].State; got != "STALE" {
+		t.Fatalf("state = %q, want STALE to outrank MAINTENANCE", got)
+	}
+}

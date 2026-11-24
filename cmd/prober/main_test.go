@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"pulse/internal/config"
+	"pulse/internal/probe"
 	"pulse/internal/state"
 )
 
@@ -102,5 +103,56 @@ probes:
 `)
 	if _, err := buildTargets(cfg, nil); err == nil {
 		t.Fatal("expected buildTargets to reject an unimplemented probe type")
+	}
+}
+
+// A result taken inside a declared window must travel to the viewer flagged, while
+// the raw failure stays a failure: the schedule is a presentation concern, history
+// is not.
+func TestToModelResultCarriesMaintenance(t *testing.T) {
+	res := probe.Result{
+		Target:     "api",
+		Group:      "web",
+		Type:       "http",
+		At:         time.Unix(1000, 0).UTC(),
+		OK:         false,
+		ErrorClass: probe.ClassConnectRefused,
+		Error:      "connection refused",
+		DurationMS: 3,
+	}
+
+	planned := toModelResult(res, state.Down, true)
+	if !planned.Maintenance {
+		t.Fatal("maintenance flag was not carried to the viewer")
+	}
+	if planned.OK {
+		t.Fatal("maintenance rewrote the raw result to OK")
+	}
+	if planned.State != string(state.Down) {
+		t.Fatalf("state = %q, want the damped state %q", planned.State, state.Down)
+	}
+
+	normal := toModelResult(res, state.Down, false)
+	if normal.Maintenance {
+		t.Fatal("a result outside a window was flagged as maintenance")
+	}
+}
+
+func TestInMaintenanceWindow(t *testing.T) {
+	p := config.Probe{
+		Name: "api",
+		Maintenance: []config.Window{{
+			From: time.Unix(1000, 0),
+			To:   time.Unix(2000, 0),
+		}},
+	}
+	if p.InMaintenance(time.Unix(500, 0)) {
+		t.Fatal("time before the window counted as maintenance")
+	}
+	if !p.InMaintenance(time.Unix(1500, 0)) {
+		t.Fatal("time inside the window did not count as maintenance")
+	}
+	if p.InMaintenance(time.Unix(2500, 0)) {
+		t.Fatal("time after the window counted as maintenance")
 	}
 }

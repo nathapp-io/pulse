@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -342,6 +343,114 @@ func TestSnapshotIncludesQuietTargets(t *testing.T) {
 		}
 		if quiet.Spec.Group != "web" {
 			t.Fatalf("quiet target spec = %+v, want the declared group", quiet.Spec)
+		}
+	})
+}
+
+func TestMaintenanceFlagSurvivesRoundTrip(t *testing.T) {
+	forEachBackend(t, nil, func(t *testing.T, st Store) {
+		base := time.Now().UTC().Truncate(time.Second)
+		specs := []model.TargetSpec{{Name: "api", Group: "web", Type: "http"}}
+
+		planned := result("api", base, false, "DOWN", 0)
+		planned.Maintenance = true
+
+		if _, err := st.Ingest(context.Background(),
+			batchOf("prober-a", specs, planned), base); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		snap, err := st.Snapshot(context.Background())
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		if len(snap.Targets) != 1 {
+			t.Fatalf("targets = %d, want 1", len(snap.Targets))
+		}
+		target := snap.Targets[0]
+		if !target.Maintenance {
+			t.Fatal("maintenance flag was lost: a planned outage would be reported as DOWN")
+		}
+		// The raw result stays truthful: it did fail, and history says so.
+		if target.Last.OK {
+			t.Fatal("maintenance rewrote the raw result to OK; history must stay truthful")
+		}
+	})
+}
+
+// A database created before maintenance windows existed must still open, and must
+// accept the new column. This is the migration path for anyone already running it.
+func TestSQLiteMigratesDatabaseWithoutMaintenanceColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE results (
+		prober TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL,
+		ok INTEGER NOT NULL, state TEXT NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0, status_code INTEGER NOT NULL DEFAULT 0,
+		error_class TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+		tls_expiry INTEGER NOT NULL DEFAULT 0, phase_json TEXT NOT NULL DEFAULT '{}',
+		PRIMARY KEY (prober, target, at))`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	st, err := Open(Config{Kind: "sqlite", Path: path, Retention: time.Hour, MaxPerTarget: 100})
+	if err != nil {
+		t.Fatalf("Open on a pre-maintenance database: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	base := time.Now().UTC().Truncate(time.Second)
+	r := result("api", base, true, "UP", 5)
+	r.Maintenance = true
+	if _, err := st.Ingest(context.Background(),
+		batchOf("prober-a", []model.TargetSpec{{Name: "api"}}, r), base); err != nil {
+		t.Fatalf("Ingest after migration: %v", err)
+	}
+
+	snap, err := st.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot after migration: %v", err)
+	}
+	if len(snap.Targets) != 1 || !snap.Targets[0].Maintenance {
+		t.Fatalf("migrated database lost the maintenance flag: %+v", snap.Targets)
+	}
+}
+
+// The flag has to survive every read path, not just the snapshot: history is what
+// the detail chart draws, and a planned failure there must still look planned.
+func TestMaintenanceFlagVisibleInHistory(t *testing.T) {
+	forEachBackend(t, nil, func(t *testing.T, st Store) {
+		base := time.Now().UTC().Truncate(time.Second)
+		specs := []model.TargetSpec{{Name: "api"}}
+
+		planned := result("api", base, false, "DOWN", 0)
+		planned.Maintenance = true
+		normal := result("api", base.Add(time.Second), false, "DOWN", 0)
+
+		if _, err := st.Ingest(context.Background(),
+			batchOf("prober-a", specs, planned, normal), base.Add(2*time.Second)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		history, err := st.History(context.Background(), "api", base.Add(-time.Minute))
+		if err != nil {
+			t.Fatalf("History: %v", err)
+		}
+		if len(history) != 2 {
+			t.Fatalf("history = %d rows, want 2", len(history))
+		}
+		if !history[0].Maintenance {
+			t.Fatal("the flagged sample lost its maintenance flag in history")
+		}
+		if history[1].Maintenance {
+			t.Fatal("an unflagged sample came back flagged")
 		}
 	})
 }

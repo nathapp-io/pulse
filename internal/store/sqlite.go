@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS results (
   error       TEXT NOT NULL DEFAULT '',
   tls_expiry  INTEGER NOT NULL DEFAULT 0,
   phase_json  TEXT NOT NULL DEFAULT '{}',
+  maintenance INTEGER NOT NULL DEFAULT 0, -- taken inside a maintenance window
   PRIMARY KEY (prober, target, at)       -- makes ingest idempotent
 );
 
@@ -92,6 +94,16 @@ func openSQLite(cfg Config) (*sqliteStore, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
+	}
+
+	// Databases created before maintenance windows existed do not have the
+	// column, and CREATE TABLE IF NOT EXISTS does not add it. SQLite has no
+	// "ADD COLUMN IF NOT EXISTS", so the duplicate-column error is expected and
+	// is the signal that the migration already ran.
+	if _, err := db.Exec(`ALTER TABLE results ADD COLUMN maintenance INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate results.maintenance: %w", err)
 	}
 	return &sqliteStore{cfg: cfg, db: db}, nil
 }
@@ -147,10 +159,11 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 
 		res, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO results(prober, target, at, ok, state, duration_ms,
-				status_code, error_class, error, tls_expiry, phase_json)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+				status_code, error_class, error, tls_expiry, phase_json, maintenance)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			b.Prober.Name, r.Target, r.At.UnixNano(), boolToInt(r.OK), model.NormalizeState(r.State),
 			r.DurationMS, r.StatusCode, r.ErrorClass, r.Error, tlsExpiry, string(phase),
+			boolToInt(r.Maintenance),
 		)
 		if err != nil {
 			return 0, fmt.Errorf("insert result %s@%s: %w", r.Target, r.At.Format(time.RFC3339Nano), err)
@@ -295,7 +308,7 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 
 	// Latest result per target (window function; SQLite >= 3.25).
 	rows, err = s.db.QueryContext(ctx, `
-		SELECT target, at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json
+		SELECT target, at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json, maintenance
 		FROM (
 			SELECT *, ROW_NUMBER() OVER (PARTITION BY target ORDER BY at DESC) AS rn
 			FROM results
@@ -305,14 +318,14 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	for rows.Next() {
 		var (
-			target  string
-			r       model.Result
-			at, tls int64
-			ok      int
-			phases  string
+			target    string
+			r         model.Result
+			at, tls   int64
+			ok, maint int
+			phases    string
 		)
 		if err := rows.Scan(&target, &at, &ok, &r.State, &r.DurationMS, &r.StatusCode,
-			&r.ErrorClass, &r.Error, &tls, &phases); err != nil {
+			&r.ErrorClass, &r.Error, &tls, &phases, &maint); err != nil {
 			_ = rows.Close()
 			return snap, err
 		}
@@ -326,8 +339,10 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 		if phases != "" && phases != "null" {
 			_ = json.Unmarshal([]byte(phases), &r.PhaseMS)
 		}
+		r.Maintenance = maint == 1
 		if idx, ok := targetOf[target]; ok {
 			targets[idx].Last = r
+			targets[idx].Maintenance = r.Maintenance
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -432,7 +447,7 @@ func (s *sqliteStore) fillLatency(ctx context.Context, targets []TargetState, ta
 
 func (s *sqliteStore) History(ctx context.Context, target string, from time.Time) ([]model.Result, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json
+		SELECT at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json, maintenance
 		FROM results WHERE target = ? AND at >= ? ORDER BY at`,
 		target, from.UnixNano())
 	if err != nil {
@@ -443,18 +458,19 @@ func (s *sqliteStore) History(ctx context.Context, target string, from time.Time
 	var out []model.Result
 	for rows.Next() {
 		var (
-			r       model.Result
-			at, tls int64
-			ok      int
-			phases  string
+			r         model.Result
+			at, tls   int64
+			ok, maint int
+			phases    string
 		)
 		if err := rows.Scan(&at, &ok, &r.State, &r.DurationMS, &r.StatusCode,
-			&r.ErrorClass, &r.Error, &tls, &phases); err != nil {
+			&r.ErrorClass, &r.Error, &tls, &phases, &maint); err != nil {
 			return nil, err
 		}
 		r.Target = target
 		r.At = time.Unix(0, at).UTC()
 		r.OK = ok == 1
+		r.Maintenance = maint == 1
 		if tls > 0 {
 			v := time.Unix(0, tls).UTC()
 			r.TLSExpiry = &v
