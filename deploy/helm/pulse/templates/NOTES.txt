@@ -32,3 +32,8 @@ History: store={{ .Values.viewer.store }}{{ if eq .Values.viewer.store "sqlite" 
 
 Revoking a prober token: edit the tokens file/Secret -- no restart and no new
 `helm upgrade` is needed. See docs/runbook.md.
+
+{{- if not .Values.imagePullSecrets }}
+NOTE: if the packages at {{ .Values.viewer.image.repository }} are private, create a
+pull secret and set imagePullSecrets, or the pods will sit in ImagePullBackOff.
+{{- end }}

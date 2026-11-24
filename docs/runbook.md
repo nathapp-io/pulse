@@ -20,6 +20,11 @@ helm upgrade --install pulse deploy/helm/pulse -n monitoring --create-namespace 
   -f my-values.yaml
 ```
 
+Images: CI publishes `ghcr.io/nathapp-io/pulse/viewer` and `.../prober` on every push
+to `main` (`latest`) and on every release tag. If the packages are private, create a pull
+secret and set `imagePullSecrets`, otherwise the pods sit in `ImagePullBackOff`. Pin a
+version in production rather than tracking `latest`.
+
 Set before the first deploy, or you will get an error by design:
 
 - `viewer.auth.password` (or `viewer.auth.existingSecret`)

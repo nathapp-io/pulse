@@ -7,11 +7,16 @@
 # The viewer is a single writer. With the sqlite store, replicas must stay at 1:
 # two pods on a ReadWriteOnce volume would corrupt each other's history.
 
+# Pull secret(s) for private registry packages, applied to both workloads.
+imagePullSecrets: []
+
 viewer:
   image:
-    repository: ghcr.io/nathapp-io/pulse-viewer
-    # Defaults to .Chart.AppVersion when empty.
-    tag: ""
+    # Must match what CI publishes: ghcr.io/<owner>/<repo>/<role>.
+    repository: ghcr.io/nathapp-io/pulse/viewer
+    # `latest` tracks main. Pin a version (or the chart appVersion of a tagged
+    # release) in production.
+    tag: latest
     pullPolicy: IfNotPresent
   replicaCount: 1
   port: 8080
@@ -71,8 +76,8 @@ viewer:
 
 prober:
   image:
-    repository: ghcr.io/nathapp-io/pulse-prober
-    tag: ""
+    repository: ghcr.io/nathapp-io/pulse/prober
+    tag: latest
     pullPolicy: IfNotPresent
   replicaCount: 1
   # Name reported to the viewer; must match viewer.expectedProbers when set.
