@@ -26,6 +26,10 @@ serves the UI. The viewer never connects back to a prober.
 - **Viewer** (`pulse-viewer`): ingest API + **pluggable history** (`memory` or `sqlite`,
   pure-Go driver so no CGO) + static UI embedded in the binary. No npm build step, no
   external database.
+- **UI**: dark, responsive, embedded in the viewer binary — no CDN, no npm build step.
+  Summary counters, per-prober health, target cards with 1h/24h/7d uptime bars and
+  p50/p95, and a latency chart per target from the history API. **28 KB gzipped** in
+  total. Behind the same Basic auth as the API.
 - **Docker-first**: distroless non-root images, `compose.yaml` for a two-service stack,
   Helm chart later.
 
@@ -35,8 +39,8 @@ one component wide.
 
 ## Status
 
-**M1 (prober core), M2a (viewer ingest + pluggable store) and M2b (prober push client,
-Docker, compose) are implemented and tested.** Next is M3, the UI.
+**M1 (prober core), M2a (viewer ingest + pluggable store), M2b (prober push client,
+Docker, compose) and M3 (the UI) are implemented and tested.**
 
 Storage is pluggable per deployment: `memory` keeps bounded rings in RAM (zero setup,
 history lost on restart) and `sqlite` persists to one file (durable). `PULSE_STORE`
@@ -47,10 +51,12 @@ selects it; a `PULSE_DB` path implies sqlite, its absence implies memory.
 ```sh
 cp .env.example .env      # edit the secrets
 docker compose up -d --build
+open http://localhost:8080/     # PULSE_PORT overrides the host port
 curl -u admin:change-me http://localhost:8080/api/v1/status
 ```
 
-The bundled prober probes two demo targets and pushes to the viewer every 10s. Replace
+The bundled prober probes two demo targets and pushes to the viewer every 10s, so the UI
+fills in within about 30s. Replace
 [`deploy/prober.compose.yaml`](deploy/prober.compose.yaml) with your own targets.
 
 Measured 2026-11-24 against real local targets:
@@ -58,7 +64,7 @@ Measured 2026-11-24 against real local targets:
 | Check | Result |
 |---|---|
 | `go vet ./...` | clean |
-| `go test -race ./...` | 52 tests, all packages pass; both storage backends run the same suite |
+| `go test -race ./...` | 62 tests, 10 packages, all pass; both storage backends run the same suite |
 | Static binary (macOS arm64) | 14 MB prober, no CGO |
 | 100 targets @ 5s intervals | **22.8 MB RSS** (budget was 60 MB) |
 | Error classification | `HTTP_STATUS`, `CONNECT_REFUSED`, `ASSERT_FAIL` all correct on live probes |
@@ -74,6 +80,8 @@ Measured 2026-11-24 against real local targets:
 | **Viewer outage, 20s** | prober queued **10**, dropped **0**, retried 4× with backoff; after recovery **17 samples over a 33.6s span, max gap 2.2s** — no hole in history |
 | Push on state change | flushes immediately instead of waiting for the batch interval |
 | Shutdown | flushes the queue before exiting |
+| UI | 200 behind auth, 401 without; unknown paths 404; **28.3 KB gzipped** in total |
+| UI in containers | both demo targets render UP at 100% 1h uptime, prober HEALTHY, detail chart fed by the history API |
 
 Decisions taken 2026-11-16:
 

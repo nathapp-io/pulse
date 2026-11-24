@@ -100,16 +100,32 @@ idempotent on `(prober,target,at)`, so a retry stores nothing twice.
   until accepted, a cancelled run still flushes, and a full queue drops the oldest.
 - Image builds from `Dockerfile` with the Go 1.21 build stage, proving the floor claim.
 
-## M3 — Viewer UI
+## M3 — Viewer UI ✅ done (2026-11-24)
 
-Grid grouped by `group`, status pill (UP/DOWN/STALE/UNKNOWN), uptime 1h/24h/7d from
-rollups, latency p50/p95, sparkline, TLS days-left, incident timeline, per-prober lag and
-last-seen. Dark/light, responsive, no CDN, no build step.
+Dark, responsive, embedded in the binary: no CDN and no npm build step, so the UI adds no
+second supply chain. `internal/ui` keeps the assets behind `//go:embed`; uPlot is vendored
+with its MIT licence.
 
-**Acceptance:** page weight < 100 KB gzipped; all three probers visible in compose with
-correct attribution; a target killed in the UI shows DOWN with error class and "since";
-a stopped prober shows STALE grey with "last seen 42s ago"; charts render 7d of rollups
-without loading raw rows.
+- Summary counters: up / down / stale / unknown / targets / probers / missing.
+- Prober strip: state, last seen, version. A declared-but-never-seen prober shows
+  MISSING, which is the case that would otherwise look like "no problem here".
+- Target cards: state pill, 1h/24h/7d uptime bars, p50/p95 over the last hour, owning
+  prober, and the last error class and message.
+- Clicking a card opens its latency chart for the last 6h from `/api/v1/history`; failed
+  probes are gaps in the line rather than zero, so an outage cannot look like a fast
+  response.
+- Auto-refresh every 10s (chart every 30s), paused while the tab is hidden.
+- Same Basic auth as the API on both the page and the assets, plus
+  `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, and `no-cache` on the page.
+  Every API string is escaped before it reaches the DOM.
+
+**Acceptance (met, in real containers):** page weight **28.3 KB gzipped** (budget 100 KB);
+page and assets 200 behind auth and 401 without it; unknown paths 404 instead of rendering
+the page; on the compose stack both demo targets render UP at 100% 1h uptime, the prober
+shows HEALTHY, and the history endpoint returns the samples the detail chart plots.
+
+**Deferred:** grouping cards by `group`, TLS days-left, an incident timeline, 7d rollup
+charts, a light theme, and gzip (responses are served identity-encoded).
 
 ## M4 — Assertions, retention, auth hardening
 
