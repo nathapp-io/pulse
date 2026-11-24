@@ -120,9 +120,14 @@ build container.
 
 **Viewer**
 - `POST /api/v1/ingest` — bearer token, batched, idempotent.
-- **SQLite** via `modernc.org/sqlite` (pure Go → static distroless image preserved):
-  `results` (raw, default 7d), `rollups_1m` (30d), `rollups_1h` (365d), `probers`,
-  `targets`. WAL mode, single writer goroutine, batched inserts.
+- **Pluggable store behind one interface** (`internal/store`), chosen with `PULSE_STORE`
+  and covered by one shared test suite so the backends cannot drift:
+  - `memory` — bounded per-target rings plus the same uptime buckets the prober uses.
+    Zero setup, no volume, **history lost on restart**.
+  - `sqlite` — **SQLite** via `modernc.org/sqlite` (pure Go → static distroless image
+    preserved): `results` (raw, default 7d), `rollup_1m` (30d), `rollup_1h` (365d),
+    `probers`, `targets`. WAL mode, single writer, batched inserts, `UNIQUE(prober,
+    target, at)` doing the idempotency.
 - Staleness/`last_seen` accounting, expected-prober list, ingest-lag metrics.
 - `GET /api/v1/status`, `/api/v1/history` for the UI; Basic auth on all of it.
 - Optional `GET /metrics` so the viewer itself can be scraped.
@@ -232,7 +237,7 @@ gRPC probes, PromQL backend, multi-tenant, SLA reports/exports.
 |---|---|---|
 | D1 | v1 UI-only, no alerting | Keep v1 small; notifier interface stubbed so phase 3 does not need a redesign |
 | D2 | Push only; viewer never contacts a prober | NAT'd LAN clusters need no inbound rules; only one component exposed |
-| D3 | **History in the viewer** (SQLite) | Probers become disposable and stateless-ish; one history for N probers; a prober restart loses nothing; no per-prober volume to back up |
+| D3 | **History in the viewer**, in a **pluggable store**: `memory` (bounded rings, zero setup, lost on restart) or `sqlite` (durable file). Chosen per deployment, same interface, same API | Probers become disposable and stateless-ish; one history for N probers; a prober restart loses nothing. Memory makes a single-node or demo install trivial, SQLite makes it durable, and neither forces a server |
 | D4 | Basic auth from env | Simplest thing that is not "no auth"; OIDC later |
 | D5 | Placement decided per deployment | Prober name/labels travel in the payload, so nothing assumes a topology |
 | D6 | **Under 100 targets** | ~3.3 probe results/s: one SQLite writer + batched inserts, in-memory status assembly, simple retention. Keeps the whole stack in tens of MB of RAM and ~250 MB of disk |

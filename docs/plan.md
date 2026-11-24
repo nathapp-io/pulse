@@ -61,21 +61,36 @@ global semaphore, state machine with `confirm_up`/`confirm_down`, uptime buckets
   serve.
 - Unknown YAML keys are rejected with the line number.
 
-## M2 — Push + ingest + history (the vertical slice)
+## M2a — Viewer ingest + pluggable store ✅ done (2026-11-24)
 
-Prober push client (batching, immediate send on state transition, bounded queue,
-exponential backoff + jitter, drop counter). Viewer ingest endpoint (bearer token,
-idempotency on `(prober,target,at)`), SQLite schema + migrations + batched writer, rollup
-jobs, staleness accounting, Basic auth, `compose.yaml` with both services.
+Ingest endpoint (bearer token, idempotent on `(prober,target,at)`), status and history
+API (Basic auth, plain or bcrypt), staleness accounting, and **two storage backends
+behind one interface**: `memory` (bounded rings + uptime buckets) and `sqlite` (WAL,
+`UNIQUE(prober,target,at)`, 1m/1h rollups, retention prune).
+
+**Acceptance (met):**
+- One shared test suite runs against both backends, so they cannot drift: idempotent
+  replay, `Since` on transition, uptime ratios, nearest-rank p50/p95, retention prune,
+  declared-but-never-probed targets visible as UNKNOWN.
+- `POST /api/v1/ingest` without or with a wrong token → 401; with the right token → 204;
+  replaying it inserts nothing.
+- Read API without credentials → 401 + `WWW-Authenticate`; plain and bcrypt both accepted.
+- Kill the prober (or stop pushing): its targets go **STALE**, never DOWN, and the last
+  known result is still shown.
+- `PULSE_STORE=sqlite` keeps history across a restart (2 samples before, 2 after);
+  `memory` does not, by design and by documentation.
+- Startup refuses `sqlite` without `PULSE_DB` and refuses to serve ingest without a token.
+
+## M2b — Prober push client (next)
+
+Batching, immediate send on state transition, bounded queue, exponential backoff +
+jitter, drop counter, `compose.yaml` with both services.
 
 **Acceptance:**
 - Stop the viewer, let the prober run 2 minutes, start the viewer: **no gap** in history,
   `pulse_push_dropped_total` = 0.
-- `POST /api/v1/ingest` without/with a wrong token → 401; with the right token → 204.
-- Replaying the same batch twice inserts no duplicate rows (`SELECT count(*)`).
-- Kill the prober: its targets go **STALE** (not DOWN) after 3 × push interval; restore it
-  and they return within one push interval.
-- UI/API without credentials → 401 `WWW-Authenticate`; with the env credentials → 200.
+- A state transition is visible in the viewer within one push interval, not one batch
+  interval.
 
 ## M3 — Viewer UI
 

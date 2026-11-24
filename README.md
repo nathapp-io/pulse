@@ -33,21 +33,31 @@ one component wide.
 
 ## Status
 
-**M1 (prober core) is implemented, tested and running.** M2 (push + ingest + SQLite)
-is next; `cmd/viewer` is still a stub.
+**M1 (prober core) and M2a (viewer ingest + pluggable store) are implemented and tested.**
+M2b (prober push client) is next; the UI is M3.
+
+Storage is pluggable per deployment: `memory` keeps bounded rings in RAM (zero setup,
+history lost on restart) and `sqlite` persists to one file (durable). `PULSE_STORE`
+selects it; a `PULSE_DB` path implies sqlite, its absence implies memory.
 
 Measured 2026-11-24 against real local targets:
 
 | Check | Result |
 |---|---|
 | `go vet ./...` | clean |
-| `go test -race ./...` | 27 tests, all packages pass |
-| Static binary (macOS arm64) | 14 MB, no CGO |
+| `go test -race ./...` | 52 tests, all packages pass; both storage backends run the same suite |
+| Static binary (macOS arm64) | 14 MB prober, no CGO |
 | 100 targets @ 5s intervals | **22.8 MB RSS** (budget was 60 MB) |
 | Error classification | `HTTP_STATUS`, `CONNECT_REFUSED`, `ASSERT_FAIL` all correct on live probes |
 | Damping | `UNKNOWN → DOWN` only on the 2nd consecutive failure |
 | `SIGHUP` reload | applies live, preserves state/uptime for unchanged targets, rejects an invalid file and keeps running |
 | Config typo (`intervall:`) | rejected at startup with the line number |
+| Ingest auth | wrong/missing token → 401, correct → 204, replay stores nothing |
+| Read auth | 401 + `WWW-Authenticate`, plain and bcrypt both accepted |
+| Silent prober | its targets go **STALE**, never DOWN, last result still shown |
+| SQLite restart | 2 samples before, **2 after** |
+| Memory restart | 0 samples after, by design |
+| Bad config | refuses sqlite without `PULSE_DB`, refuses ingest without a token |
 
 Decisions taken 2026-11-16:
 
@@ -55,10 +65,26 @@ Decisions taken 2026-11-16:
 |---|---|
 | D1 | v1 is UI-only: no alerting. Notifier interface stubbed, no implementation. |
 | D2 | **Push only.** Prober → viewer over HTTP(S). Viewer never calls a prober. |
-| D3 | **History lives in the viewer** (SQLite). Prober keeps only live state + uptime buckets. |
-| D4 | Viewer auth: **HTTP Basic from env** (`PULSE_AUTH_USER` / `PULSE_AUTH_PASSWORD`). |
+| D3 | **History lives in the viewer**, in a **pluggable store**: `memory` (bounded rings, zero setup, lost on restart) or `sqlite` (durable file). Same interface, same API. |
+| D4 | Viewer auth: **HTTP Basic from env** (`PULSE_AUTH_USER` / `PULSE_AUTH_PASSWORD`, or `PULSE_AUTH_PASSWORD_HASH` for bcrypt). |
 | D5 | Prober placement is a deployment-time decision; nothing in the design assumes it. |
-| D6 | Scale: **under 100 targets** — one SQLite writer, batched inserts, simple retention. |
+| D6 | Scale: **under 100 targets** — one writer, batched inserts, simple retention. |
+
+## Viewer storage
+
+Chosen per deployment, one interface, identical API and behaviour:
+
+| | `memory` | `sqlite` |
+|---|---|---|
+| Setup | none | one file (`PULSE_DB`) |
+| History across restart | **lost** | kept |
+| Long windows | uptime buckets in RAM | 1m/1h rollups |
+| Good for | single node, demos, CI | anything you want to keep |
+
+`PULSE_STORE=memory|sqlite` selects it. When unset, a `PULSE_DB` path implies `sqlite`
+and no path implies `memory`, so `docker run` works with no configuration at all. The
+backend in use is logged at startup, because silently losing history is worse than being
+told.
 
 See [`docs/brainstorm.md`](docs/brainstorm.md) for the reasoning, contracts and risks,
 [`docs/plan.md`](docs/plan.md) for milestones, and
