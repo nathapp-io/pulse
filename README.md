@@ -72,4 +72,4 @@ alternatives considered: `beacon`, `vigil`, `checkmate`.
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).
