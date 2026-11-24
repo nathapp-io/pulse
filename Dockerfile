@@ -7,6 +7,8 @@ FROM golang:1.21-alpine AS build
 ARG ROLE=prober
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Release version, stamped into the binary and reported at startup and by /metrics.
+ARG VERSION=0.1.0-dev
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -14,7 +16,9 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
-    go build -trimpath -ldflags="-s -w" -o /out/pulse ./cmd/${ROLE}
+    go build -trimpath \
+      -ldflags="-s -w -X pulse/internal/build.Version=${VERSION}" \
+      -o /out/pulse ./cmd/${ROLE}
 
 # Pre-create the history directory with the runtime user's ownership: Docker
 # initialises an empty named volume from the image path, so sqlite can write to it.

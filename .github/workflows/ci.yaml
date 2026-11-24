@@ -147,6 +147,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             ROLE=${{ matrix.role }}
+            # A tag build stamps 0.1.0; a branch build stamps its name/sha.
+            VERSION=${{ steps.meta.outputs.version }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

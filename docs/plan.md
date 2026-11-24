@@ -209,6 +209,16 @@ decision) and the multi-platform *manifest* build (the buildx container driver m
 `moby/buildkit`, which this non-interactive session cannot authenticate for). Both are
 covered by the CI pipeline.
 
+## Release — v0.1.0
+
+The version is stamped at build time (`-X pulse/internal/build.Version`), so the binary,
+the startup log line and `/metrics` agree with the image tag. A local `go build` still says
+`0.1.0-dev`, which is the honest answer for a binary built from a working tree.
+
+`CHANGELOG.md` records what shipped and, deliberately, the omissions: no alerting, push
+only, one writer, no OIDC or Prometheus backend. A release note that only lists features
+leaves the reader to discover the limits afterwards.
+
 ## Testing strategy
 
 - `httptest` for the HTTP probe/assertion matrix (status, redirect, TLS, timeout, slow
