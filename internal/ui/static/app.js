@@ -53,14 +53,18 @@
     const s = status.summary || {};
     const item = (label, value, cls) =>
       `<span><b class="${cls || ""}">${value ?? 0}</b>${escapeHTML(label)}</span>`;
+    // "1 probers" in a header is the kind of thing a screenshot catches and a test
+    // does not.
+    const counted = (label, value, cls) =>
+      item(value === 1 ? label.replace(/s$/, "") : label, value, cls);
     $("#summary").innerHTML = [
       item("up", s.up, "up-text"),
       item("down", s.down, "down-text"),
       item("stale", s.stale, "stale-text"),
       item("maint", s.maintenance, "maint-text"),
       item("unknown", s.unknown),
-      item("targets", s.targets),
-      item("probers", s.probers),
+      counted("targets", s.targets),
+      counted("probers", s.probers),
       s.probers_missing ? item("missing", s.probers_missing, "down-text") : "",
     ].join("");
     $("#updated").textContent = "updated " + new Date(status.generated_at).toLocaleTimeString();
@@ -119,8 +123,9 @@
         </header>
         ${uptimeBars(t.uptime)}
         <div class="numbers">
-          <span>p50 ${ms(latency.p50)}</span>
-          <span>p95 ${ms(latency.p95)}</span>
+          ${latency.p50 == null
+            ? `<span class="muted">no successful probes</span>`
+            : `<span>p50 ${ms(latency.p50)}</span><span>p95 ${ms(latency.p95)}</span>`}
           <span>${escapeHTML(t.prober)}</span>
         </div>
         ${failure}
