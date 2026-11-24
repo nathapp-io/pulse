@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"pulse/internal/model"
+	"pulse/internal/ui"
 	"pulse/internal/viewer"
 )
 
@@ -72,7 +74,39 @@ func New(v *viewer.Viewer, cfg Config, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("/api/v1/status", h.read(h.status))
 	mux.HandleFunc("/api/v1/history", h.read(h.history))
 	mux.HandleFunc("/healthz", h.healthz)
+
+	// The UI is embedded in the binary: same origin as the API, same auth.
+	assets := http.FileServer(http.FS(ui.FS()))
+	mux.Handle("/static/", h.read(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.StripPrefix("/static/", assets).ServeHTTP(w, r)
+	}))
+	mux.HandleFunc("/", h.read(h.index))
 	return mux
+}
+
+// index serves the embedded page. Every other unknown path is a 404 rather than
+// the index, so a typo in an API path does not look like a working page.
+func (h *handler) index(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	page, err := fs.ReadFile(ui.FS(), "index.html")
+	if err != nil {
+		h.logger.Error("embedded index.html unreadable", "error", err)
+		http.Error(w, "ui unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// The UI sets inline width styles for the uptime bars, hence the style-src
+	// exception; everything else must come from this origin.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
+	_, _ = w.Write(page)
 }
 
 // read wraps a read endpoint with Basic auth (when configured) and a GET check.

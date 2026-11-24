@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pulse</title>
+  <link rel="stylesheet" href="/static/vendor/uplot.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>pulse</h1>
+    <div id="summary" class="summary" aria-live="polite"></div>
+    <div class="topbar-right">
+      <span id="updated" class="muted"></span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="error" class="banner" hidden></section>
+
+    <section class="panel">
+      <h2>Probers</h2>
+      <div id="probers" class="probers"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Targets</h2>
+      <div id="targets" class="targets"></div>
+    </section>
+
+    <section id="detail" class="panel detail" hidden>
+      <div class="detail-head">
+        <h2 id="detail-title">Target</h2>
+        <button id="detail-close" type="button" aria-label="Close">Close</button>
+      </div>
+      <div id="import-url" class="muted"></div>
+      <div id="chart" class="chart"></div>
+      <div id="detail-meta" class="detail-meta"></div>
+    </section>
+  </main>
+
+  <footer class="footer muted">
+    <span>pulse — push-based uptime monitoring</span>
+    <span>click a target for its latency history</span>
+  </footer>
+
+  <script src="/static/vendor/uplot.iife.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

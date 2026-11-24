@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,4 +226,53 @@ func TestConfigValidate(t *testing.T) {
 			t.Fatalf("%s: Validate rejected a valid config: %v", name, err)
 		}
 	}
+}
+
+func TestServesEmbeddedUI(t *testing.T) {
+	h := newTestHandler(t, Config{AuthUser: testUser, AuthPassword: testPass})
+
+	// The UI sits behind the same auth as the API.
+	if rec := get(t, h, "/", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated index: status = %d, want 401", rec.Code)
+	}
+
+	rec := get(t, h, "/", withBasic(testUser, testPass))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index: status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("index content-type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pulse") || !strings.Contains(body, "/static/app.js") {
+		t.Fatalf("index body does not look like the UI: %q", body[:min(len(body), 120)])
+	}
+	if rec.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("index is served without a Content-Security-Policy")
+	}
+
+	for _, asset := range []string{
+		"/static/app.js",
+		"/static/styles.css",
+		"/static/vendor/uplot.iife.min.js",
+		"/static/vendor/uplot.min.css",
+	} {
+		if rec := get(t, h, asset, withBasic(testUser, testPass)); rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", asset, rec.Code)
+		}
+	}
+
+	if rec := get(t, h, "/static/../go.mod", withBasic(testUser, testPass)); rec.Code == http.StatusOK {
+		t.Fatal("path traversal outside the embedded assets was served")
+	}
+	if rec := get(t, h, "/nope", withBasic(testUser, testPass)); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown path: status = %d, want 404", rec.Code)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
