@@ -46,6 +46,9 @@ or set the org's default package visibility to public for future packages.
 
 Pin a version rather than tracking `latest` in production.
 
+If an `images` job fails with `buildx failed with:` followed by a blob of HTML, that is a
+transient registry error from ghcr, not a build problem: re-run the failed job.
+
 Set before the first deploy, or you will get an error by design:
 
 - `viewer.auth.password` (or `viewer.auth.existingSecret`)
