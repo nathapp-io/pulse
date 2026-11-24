@@ -232,7 +232,9 @@ func TestTLSExpiringWarning(t *testing.T) {
 	defer ts.Close()
 
 	p := target("api", ts.URL, func(p *config.Probe) {
-		p.Expect.TLSExpiryMin = config.Duration(200000 * time.Hour) // longer than any test cert
+		// httptest's certificate is valid for ~60 more years, so the threshold
+		// has to exceed that to exercise the warning path.
+		p.Expect.TLSExpiryMin = config.Duration(100 * 365 * 24 * time.Hour)
 	})
 	h, err := NewHTTP(p)
 	if err != nil {

@@ -103,7 +103,9 @@ build container.
 
 **Prober (exporter)**
 - YAML config, `--config`, reload on `SIGHUP` / file change; invalid config keeps the
-  last-good state and never stops the process.
+  last-good state and never stops the process, and a reload **preserves the state machine
+  and uptime rings of every target whose configuration did not change** (otherwise each
+  edit would emit a spurious DOWN and zero the history).
 - One worker goroutine per target, ticker with ±10% jitter, global in-flight semaphore.
 - Probe types: `http`/`https`, `tcp`, `icmp` (opt-in, needs `NET_RAW`); later `dns`.
 - Assertions (http): status set, body regex, JSON path, header check, `tls_expiry_min`.

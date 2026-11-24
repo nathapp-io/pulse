@@ -55,7 +55,10 @@ func NewHTTP(p *config.Probe) (*HTTP, error) {
 	}
 
 	transport := &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
+		// Probes must go direct: honouring HTTP(S)_PROXY would report "up"
+		// for a target that is unreachable from this host, and would blame
+		// the proxy for the proxy's own failures.
+		Proxy:               nil,
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
 		TLSHandshakeTimeout: p.Timeout.D(),
@@ -129,8 +132,11 @@ func (h *HTTP) Probe(ctx context.Context) Result {
 
 	resp, err := h.client.Do(req)
 	if err != nil {
+		// A connection that was established means the failure happened while
+		// waiting for the response, which is a slow server, not an unreachable
+		// one. connDone is only set on a successful connect (see above).
 		phase := PhaseConnect
-		if !tlsDone.IsZero() || !firstByte.IsZero() {
+		if !connDone.IsZero() || !tlsDone.IsZero() || !firstByte.IsZero() {
 			phase = PhaseTTFB
 		}
 		return fail(res, start, Classify(err, phase), err)

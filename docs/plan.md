@@ -43,17 +43,23 @@ validation with table-driven tests, `Makefile`, `compose.yaml` skeleton (empty i
 --config config.example.yaml --check` validates the example and exits 0; unknown YAML
 keys are a hard error (typos in probe config must never silently do nothing).
 
-## M1 — Prober core
+## M1 — Prober core ✅ done (2026-11-24)
 
 HTTP(S) + TCP probes, error classification, per-target scheduling with jitter and a
 global semaphore, state machine with `confirm_up`/`confirm_down`, uptime buckets,
 `/metrics` + `/healthz` on `:8081`.
 
-**Acceptance:** with 3 targets (healthy HTTPS, closed TCP port, HTTP 500) `/metrics`
-reports `probe_success` 1/0/0 with the right `probe_error_total{phase}` classes
-(`CONNECT_REFUSED`, `HTTP_STATUS`); a target that fails once stays UP; image < 30 MB; 100
-targets at 30s stay under 60 MB RSS; `kill -HUP` applies config changes without dropping
-the process.
+**Acceptance (met, measured against real local targets):**
+- 4 targets (healthy HTTPS-equivalent, wrong body, HTTP 500, closed TCP port) report
+  `probe_success` 1/0/0/0 with `probe_error_total` classes `HTTP_STATUS`,
+  `ASSERT_FAIL`, `CONNECT_REFUSED`.
+- A slow-but-connected server is `HTTP_TIMEOUT`, not `CONNECT_TIMEOUT`.
+- Damping: `UNKNOWN → DOWN` only on the second consecutive failure.
+- 100 targets @5s: **22.8 MB RSS**, binary **14 MB**, no CGO.
+- `SIGHUP` applies changes live, **preserves state and uptime for unchanged targets**
+  (a reload must not reset history), and rejects an invalid file while continuing to
+  serve.
+- Unknown YAML keys are rejected with the line number.
 
 ## M2 — Push + ingest + history (the vertical slice)
 

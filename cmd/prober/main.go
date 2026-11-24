@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"sync"
 	"syscall"
 	"time"
@@ -64,7 +65,7 @@ func main() {
 	}
 
 	m := metrics.New()
-	targets, err := buildTargets(cfg)
+	targets, err := buildTargets(cfg, nil)
 	if err != nil {
 		logger.Error("cannot build probes", "error", err)
 		os.Exit(1)
@@ -170,7 +171,12 @@ func reloadOnHUP(
 				logger.Error("reload rejected, keeping the running configuration", "error", err)
 				continue
 			}
-			newTargets, err := buildTargets(newCfg)
+
+			mu.RLock()
+			previous := *current
+			mu.RUnlock()
+
+			newTargets, err := buildTargets(newCfg, previous)
 			if err != nil {
 				logger.Error("reload rejected, keeping the running configuration", "error", err)
 				continue
@@ -186,10 +192,18 @@ func reloadOnHUP(
 	}
 }
 
-func buildTargets(cfg *config.File) (map[string]*targetRuntime, error) {
+// buildTargets builds the runtime for every configured target, reusing the
+// previous runtime of any target whose configuration did not change. Without that
+// reuse a reload would reset every state machine (a spurious UNKNOWN -> DOWN) and
+// zero every uptime window, on every config edit.
+func buildTargets(cfg *config.File, previous map[string]*targetRuntime) (map[string]*targetRuntime, error) {
 	out := make(map[string]*targetRuntime, len(cfg.Probes))
 	for i := range cfg.Probes {
 		p := cfg.Probes[i]
+		if prev, ok := previous[p.Name]; ok && reflect.DeepEqual(prev.cfg, p) {
+			out[p.Name] = prev
+			continue
+		}
 		pr, err := probe.New(&p)
 		if err != nil {
 			return nil, fmt.Errorf("target %q: %w", p.Name, err)

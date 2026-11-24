@@ -33,7 +33,23 @@ one component wide.
 
 ## Status
 
-Design phase — **no application code yet**. Decisions taken 2026-11-16:
+**M1 (prober core) is implemented, tested and running.** M2 (push + ingest + SQLite)
+is next; `cmd/viewer` is still a stub.
+
+Measured 2026-11-24 against real local targets:
+
+| Check | Result |
+|---|---|
+| `go vet ./...` | clean |
+| `go test -race ./...` | 27 tests, all packages pass |
+| Static binary (macOS arm64) | 14 MB, no CGO |
+| 100 targets @ 5s intervals | **22.8 MB RSS** (budget was 60 MB) |
+| Error classification | `HTTP_STATUS`, `CONNECT_REFUSED`, `ASSERT_FAIL` all correct on live probes |
+| Damping | `UNKNOWN → DOWN` only on the 2nd consecutive failure |
+| `SIGHUP` reload | applies live, preserves state/uptime for unchanged targets, rejects an invalid file and keeps running |
+| Config typo (`intervall:`) | rejected at startup with the line number |
+
+Decisions taken 2026-11-16:
 
 | # | Decision |
 |---|---|

@@ -55,13 +55,13 @@ func TestSinceUpdatesOnlyOnTransition(t *testing.T) {
 	m := New(1, 1)
 
 	m.Observe(true, base)
-	entered, _ := m.Snapshot()
+	_, entered := m.Snapshot()
 	if !entered.Equal(base) {
 		t.Fatalf("since = %s, want %s", entered, base)
 	}
 
 	m.Observe(true, base.Add(time.Hour))
-	entered, _ = m.Snapshot()
+	_, entered = m.Snapshot()
 	if !entered.Equal(base) {
 		t.Fatalf("since moved on a non-transition: %s", entered)
 	}
