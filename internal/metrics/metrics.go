@@ -30,6 +30,7 @@ type Metrics struct {
 
 	pushQueued      prometheus.Gauge
 	pushDropped     prometheus.Counter
+	pushFailures    prometheus.Counter
 	pushLastSuccess prometheus.Gauge
 }
 
@@ -75,6 +76,10 @@ func New() *Metrics {
 			Name: "pulse_push_dropped_total",
 			Help: "Results dropped because the push queue was full.",
 		}),
+		pushFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "pulse_push_failures_total",
+			Help: "Failed push attempts (retried with backoff; results stay queued).",
+		}),
 		pushLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "pulse_push_last_success_timestamp_seconds",
 			Help: "Unix timestamp of the last successful push to the viewer.",
@@ -90,7 +95,7 @@ func New() *Metrics {
 	reg.MustRegister(
 		m.success, m.duration, m.statusCode, m.tlsExpiry, m.lastSuccess,
 		m.errorTotal, m.uptimeRatio,
-		m.pushQueued, m.pushDropped, m.pushLastSuccess, buildInfo,
+		m.pushQueued, m.pushDropped, m.pushFailures, m.pushLastSuccess, buildInfo,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -139,6 +144,9 @@ func (m *Metrics) PushQueued(n int) { m.pushQueued.Set(float64(n)) }
 
 // PushDropped records one result dropped from a full queue.
 func (m *Metrics) PushDropped() { m.pushDropped.Inc() }
+
+// PushFailed records one failed push attempt.
+func (m *Metrics) PushFailed() { m.pushFailures.Inc() }
 
 // PushSucceeded records a successful push batch at time t.
 func (m *Metrics) PushSucceeded(t time.Time) { m.pushLastSuccess.Set(float64(t.Unix())) }

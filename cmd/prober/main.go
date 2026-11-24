@@ -1,9 +1,12 @@
-// Command prober runs the pulse exporter: it probes every configured target and
-// publishes results as Prometheus metrics. Pushing to the viewer arrives in M2.
+// Command prober runs the pulse exporter: it probes every configured target,
+// exposes the results as Prometheus metrics, and pushes them to the viewer when
+// viewer.url is configured.
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,7 +23,9 @@ import (
 	"pulse/internal/build"
 	"pulse/internal/config"
 	"pulse/internal/metrics"
+	"pulse/internal/model"
 	"pulse/internal/probe"
+	"pulse/internal/push"
 	"pulse/internal/schedule"
 	"pulse/internal/state"
 	"pulse/internal/uptime"
@@ -60,10 +66,6 @@ func main() {
 		return
 	}
 
-	if cfg.Viewer.URL == "" {
-		logger.Warn("viewer.url is not set: results are only exposed on /metrics")
-	}
-
 	m := metrics.New()
 	targets, err := buildTargets(cfg, nil)
 	if err != nil {
@@ -79,6 +81,58 @@ func main() {
 		current = targets
 	)
 
+	targetsSpec := func() []model.TargetSpec {
+		mu.RLock()
+		defer mu.RUnlock()
+		out := make([]model.TargetSpec, 0, len(current))
+		for name, rt := range current {
+			out = append(out, model.TargetSpec{Name: name, Group: rt.cfg.Group, Type: rt.cfg.Type})
+		}
+		return out
+	}
+
+	var (
+		pusher   *push.Client
+		pushDone chan struct{}
+	)
+	if cfg.Viewer.URL != "" {
+		token := strings.TrimSpace(os.Getenv(cfg.Viewer.TokenEnv))
+		if token == "" {
+			logger.Error("cannot push without a token: the configured environment variable is empty",
+				"env", cfg.Viewer.TokenEnv)
+			os.Exit(1)
+		}
+		pusher, err = push.New(push.Config{
+			URL:                cfg.Viewer.URL,
+			Token:              token,
+			Interval:           cfg.Viewer.PushInterval.D(),
+			Timeout:            cfg.Viewer.PushTimeout.D(),
+			QueueSize:          cfg.Viewer.QueueSize,
+			InsecureSkipVerify: cfg.Viewer.TLSInsecureSkipVerify,
+			ProberName:         cfg.Prober.Name,
+			ProberVersion:      build.Version,
+			Labels:             cfg.Prober.Labels,
+			ConfigHash:         configHash(*configPath),
+			Targets:            targetsSpec,
+		}, m)
+		if err != nil {
+			logger.Error("cannot start the push client", "error", err)
+			os.Exit(1)
+		}
+		pushDone = make(chan struct{})
+		go func() {
+			defer close(pushDone)
+			pusher.Run(ctx)
+		}()
+		logger.Info("pushing results to the viewer",
+			"url", cfg.Viewer.URL,
+			"interval", cfg.Viewer.PushInterval.D(),
+			"queue_size", cfg.Viewer.QueueSize,
+		)
+	} else {
+		logger.Warn("viewer.url is not set: results are only exposed on /metrics")
+	}
+
 	handle := func(res probe.Result) {
 		mu.RLock()
 		rt := current[res.Target]
@@ -92,6 +146,16 @@ func main() {
 		m.Observe(res)
 		for _, w := range windows {
 			m.SetUptime(res.Target, res.Group, w.name, rt.buckets.Ratio(w.d))
+		}
+
+		if pusher != nil {
+			currentState, _ := rt.machine.Snapshot()
+			pusher.Enqueue(toModelResult(res, currentState))
+			if changed {
+				// A state change must reach the viewer in seconds, not at the
+				// next batch interval.
+				pusher.FlushNow()
+			}
 		}
 
 		if !res.OK {
@@ -140,6 +204,12 @@ func main() {
 	logger.Info("shutting down")
 
 	runner.Stop()
+
+	// The run context is already cancelled: wait for the final flush so results
+	// the viewer never saw are not thrown away on a clean shutdown.
+	if pushDone != nil {
+		<-pushDone
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -239,4 +309,41 @@ func metricsMux(m *metrics.Metrics) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	return mux
+}
+
+// configHash identifies the configuration to the viewer without shipping it, so a
+// changed target set is visible there.
+func configHash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
+// toModelResult converts an internal probe result into the wire format, carrying
+// the damped state so the viewer never has to re-derive flap policy.
+func toModelResult(res probe.Result, st state.State) model.Result {
+	out := model.Result{
+		Target:     res.Target,
+		At:         res.At,
+		OK:         res.OK,
+		State:      string(st),
+		DurationMS: res.DurationMS,
+		StatusCode: res.StatusCode,
+		ErrorClass: string(res.ErrorClass),
+		Error:      res.Error,
+	}
+	if len(res.PhaseMS) > 0 {
+		out.PhaseMS = make(map[string]int64, len(res.PhaseMS))
+		for phase, ms := range res.PhaseMS {
+			out.PhaseMS[string(phase)] = ms
+		}
+	}
+	if !res.TLSExpiry.IsZero() {
+		expiry := res.TLSExpiry
+		out.TLSExpiry = &expiry
+	}
+	return out
 }
