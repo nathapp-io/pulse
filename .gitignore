@@ -1,0 +1,21 @@
+# build output
+/bin/
+/dist/
+pulse-prober
+pulse-viewer
+*.test
+*.out
+coverage.*
+
+# local config / secrets — never commit
+config.yaml
+config.local.yaml
+.env
+.env.*
+!.env.example
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

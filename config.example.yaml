@@ -1,0 +1,76 @@
+# pulse prober configuration (example)
+# Read-only mount recommended: -v $PWD/config.yaml:/etc/pulse/config.yaml:ro
+# Reload with `kill -HUP <pid>` (keeps last-good config on validation error).
+
+prober:
+  name: prober-cloud            # shown in the viewer; unique per prober
+  listen: ":8080"
+  # labels:                      # optional, attach to every metric
+  #   region: oci-apse
+  max_concurrent_probes: 32
+  history_size: 1440             # results kept per target (~12h at 30s)
+
+defaults:                        # per-target keys override these
+  interval: 30s
+  timeout: 5s
+  confirm_down: 2                # consecutive failures before DOWN
+  confirm_up: 1
+  follow_redirects: true
+  max_body_bytes: 65536
+
+probes:
+  # ---------------------------------------------------------------- HTTPS + assertions
+  - name: api
+    group: web
+    type: http
+    url: https://api.example.com/health
+    interval: 30s
+    expect:
+      status: [200]
+      json_path:
+        path: "$.status"
+        equals: "ok"
+      tls_expiry_min: 336h       # warn if the cert expires within 14 days
+    # headers:
+    #   Authorization: "Bearer ${PROBE_TOKEN}"   # env substituted, never logged
+
+  # ---------------------------------------------------------------- plain HTTP
+  - name: dashboard
+    group: web
+    type: http
+    url: http://dashboard.default.svc.cluster.local:8080/
+    expect:
+      status: [200, 204]
+      body_regex: "(?i)healthy"
+
+  # ---------------------------------------------------------------- TCP port
+  - name: postgres-oci
+    group: data
+    type: tcp
+    address: 192.0.2.10:5432
+    interval: 60s
+    timeout: 3s
+
+  # ---------------------------------------------------------------- TCP from hostname
+  - name: redis-shared
+    group: data
+    type: tcp
+    address: redis.data.svc.cluster.local:6379
+
+  # ---------------------------------------------------------------- ICMP (opt-in)
+  # Requires CAP_NET_RAW / container `cap_add: [NET_RAW]`.
+  # - name: gateway-oci
+  #   group: network
+  #   type: icmp
+  #   address: 203.0.113.10
+  #   interval: 60s
+
+  # ---------------------------------------------------------------- maintenance window
+  # - name: legacy-api
+  #   group: legacy
+  #   type: http
+  #   url: https://legacy.example.com/ping
+  #   maintenance:
+  #     - from: "2026-11-20T22:00:00Z"
+  #       to: "2026-11-21T02:00:00Z"
+  #       reason: "planned DB migration"
