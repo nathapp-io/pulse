@@ -24,22 +24,12 @@ Images: CI publishes `ghcr.io/nathapp-io/pulse/viewer` and `.../prober` on every
 to `main` (`latest`) and on every release tag, using the run's own `GITHUB_TOKEN` (the job
 declares `packages: write`) — no personal token and no repository secret is involved.
 
-**New ghcr packages are created private even when the repository is public**, so an
-open-source deployment has to flip them once. That is deliberate on GitHub's part and not
-something CI can do for you: the workflow token can push but cannot change visibility.
-After flipping, no pull secret is needed and the chart's defaults work as-is.
+The packages are **public**, so no pull secret is needed and the chart defaults work as-is.
+Verified anonymously: both manifests list `linux/amd64` and `linux/arm64`, and a compose
+stack started from these images reports its targets `UP`.
 
 ```sh
-# one click each, or from the API with a token that has the package scope:
-#   gh auth refresh -s read:packages,write:packages
-#   https://github.com/orgs/nathapp-io/packages/container/pulse%2Fprober/settings
-gh api --method PATCH /orgs/nathapp-io/packages/container/pulse%2Fprober  -f visibility=public
-gh api --method PATCH /orgs/nathapp-io/packages/container/pulse%2Fviewer  -f visibility=public
-```
-
-Verify, and see both architectures while you are there:
-
-```sh
+# confirms it is pullable without credentials, and shows both architectures
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:nathapp-io/pulse/prober:pull&service=ghcr.io" \
   | jq -r .token)
 curl -s -H "Authorization: Bearer $TOKEN" \
@@ -47,9 +37,14 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   https://ghcr.io/v2/nathapp-io/pulse/prober/manifests/latest | jq '[.manifests[].platform]'
 ```
 
-An empty or missing token means the package is still private. `imagePullSecrets` remains
-for private forks, mirrored registries, and air-gapped installs. Pin a version rather than
-tracking `latest` in production.
+For a **fork** publishing under its own namespace: a new ghcr package is created private
+even when the repository is public, and the workflow token can push but cannot change
+visibility. Flip it once (`gh auth refresh -s write:packages`, then
+`gh api --method PATCH /orgs/<org>/packages/container/pulse%2Fprober -f visibility=public`),
+or set the org's default package visibility to public for future packages.
+`imagePullSecrets` is only for private mirrors and air-gapped installs.
+
+Pin a version rather than tracking `latest` in production.
 
 Set before the first deploy, or you will get an error by design:
 

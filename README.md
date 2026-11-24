@@ -117,9 +117,14 @@ helm upgrade --install pulse deploy/helm/pulse -n monitoring --create-namespace 
   --set viewer.auth.password='...' -f my-values.yaml
 ```
 
-CI publishes multi-arch (`amd64`, `arm64`) images to
-`ghcr.io/nathapp-io/pulse/{viewer,prober}`. If they are still private after the first
-push, see the runbook — one click makes them public, and then no pull secret is needed.
+CI publishes public multi-arch (`amd64`, `arm64`) images to
+`ghcr.io/nathapp-io/pulse/{viewer,prober}`, so there is nothing to build and no pull
+secret to create:
+
+```sh
+cp .env.example .env      # edit the secrets
+docker compose -f deploy/compose.release.yaml --env-file .env up -d
+```
 
 The chart refuses to render when the configuration would silently lose history
 (`sqlite` with more than one viewer replica, or persistence enabled with the `memory`

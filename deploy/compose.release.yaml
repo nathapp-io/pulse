@@ -1,0 +1,47 @@
+# Run the published images -- no build, no registry login, no pull secret.
+#
+#   cp .env.example .env    # then edit the secrets
+#   # --env-file is required: compose looks for .env beside this file, not in the
+#   # repo root, so without it the required-variable guards fire.
+#   docker compose -f deploy/compose.release.yaml --env-file .env up -d
+#   open http://localhost:8080/   (HTTP Basic auth with PULSE_AUTH_USER/PASSWORD)
+#
+# Pin PULSE_TAG to a release (e.g. 0.1.0) in production; `latest` tracks main.
+# Building from source instead: `docker compose up -d --build` in the repo root.
+name: pulse
+
+x-pull: &pull
+  pull_policy: always
+
+services:
+  viewer:
+    <<: *pull
+    image: ghcr.io/nathapp-io/pulse/viewer:${PULSE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${PULSE_PORT:-8080}:8080"
+    environment:
+      PULSE_STORE: sqlite
+      PULSE_DB: /var/lib/pulse/pulse.db
+      PULSE_AUTH_USER: ${PULSE_AUTH_USER:-admin}
+      PULSE_AUTH_PASSWORD: ${PULSE_AUTH_PASSWORD:?set PULSE_AUTH_PASSWORD in .env}
+      PULSE_INGEST_TOKEN: ${PULSE_INGEST_TOKEN:?set PULSE_INGEST_TOKEN in .env}
+      PULSE_EXPECTED_PROBERS: prober
+      PULSE_STALE_AFTER: 60s
+    volumes:
+      - pulse-data:/var/lib/pulse
+
+  prober:
+    <<: *pull
+    image: ghcr.io/nathapp-io/pulse/prober:${PULSE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      - viewer
+    command: ["--config", "/etc/pulse/config.yaml"]
+    environment:
+      PULSE_INGEST_TOKEN: ${PULSE_INGEST_TOKEN:?set PULSE_INGEST_TOKEN in .env}
+    volumes:
+      - ./prober.compose.yaml:/etc/pulse/config.yaml:ro
+
+volumes:
+  pulse-data:

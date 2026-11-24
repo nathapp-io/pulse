@@ -47,6 +47,11 @@ jobs:
       - name: example config still parses
         run: go run ./cmd/prober --config config.example.yaml --check
 
+      - name: release compose file is valid
+        run: |
+          PULSE_AUTH_PASSWORD=x PULSE_INGEST_TOKEN=y \
+            docker compose -f deploy/compose.release.yaml config --quiet
+
       - name: embedded UI assets present
         run: |
           for asset in index.html app.js styles.css vendor/uplot.iife.min.js vendor/uplot.LICENSE; do

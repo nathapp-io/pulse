@@ -199,6 +199,11 @@ validation and admission; `actionlint` clean and the helm job's steps executed l
 both roles cross-compile to statically linked `x86-64` and `aarch64` binaries, which is
 what the multi-arch image depends on.
 
+**Published images:** both packages are public on ghcr, and were verified the hard way —
+pulled anonymously, then run as a stack: one target `UP` from the viewer's own `/healthz`,
+one `DOWN` from a refused port, and the UI served over Basic auth. `deploy/compose.release.yaml`
+runs those published images with no build and no registry login.
+
 **Not verified here:** a real cluster install (needs published images plus a namespace
 decision) and the multi-platform *manifest* build (the buildx container driver must pull
 `moby/buildkit`, which this non-interactive session cannot authenticate for). Both are
