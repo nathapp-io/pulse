@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"pulse/internal/ingestauth"
 	"pulse/internal/model"
 	"pulse/internal/store"
 	"pulse/internal/viewer"
@@ -24,8 +27,8 @@ const (
 
 func newTestHandler(t *testing.T, cfg Config) http.Handler {
 	t.Helper()
-	if cfg.IngestToken == "" {
-		cfg.IngestToken = testToken
+	if cfg.Ingest == nil {
+		cfg.Ingest = newIngestAuth(t, map[string]string{ingestauth.AnyProber: testToken})
 	}
 	st, err := store.Open(store.Config{Kind: "memory", Retention: time.Hour, MaxPerTarget: 100})
 	if err != nil {
@@ -33,6 +36,15 @@ func newTestHandler(t *testing.T, cfg Config) http.Handler {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return New(viewer.New(st, viewer.Config{StaleAfter: time.Minute}), cfg, nil)
+}
+
+func newIngestAuth(t *testing.T, static map[string]string) *ingestauth.Store {
+	t.Helper()
+	auth, err := ingestauth.New(ingestauth.Options{Static: static})
+	if err != nil {
+		t.Fatalf("ingest auth: %v", err)
+	}
+	return auth
 }
 
 func sampleBatch(at time.Time) model.Batch {
@@ -207,15 +219,16 @@ func TestHealthzIsOpen(t *testing.T) {
 }
 
 func TestConfigValidate(t *testing.T) {
+	auth := newIngestAuth(t, map[string]string{ingestauth.AnyProber: "t"})
 	cases := map[string]struct {
 		cfg     Config
 		wantErr bool
 	}{
 		"missing token":      {Config{}, true},
-		"user without pass":  {Config{IngestToken: "t", AuthUser: "u"}, true},
-		"both pass and hash": {Config{IngestToken: "t", AuthUser: "u", AuthPassword: "p", AuthPasswordHash: "h"}, true},
-		"plain password":     {Config{IngestToken: "t", AuthUser: "u", AuthPassword: "p"}, false},
-		"no auth at all":     {Config{IngestToken: "t"}, false},
+		"user without pass":  {Config{Ingest: auth, AuthUser: "u"}, true},
+		"both pass and hash": {Config{Ingest: auth, AuthUser: "u", AuthPassword: "p", AuthPasswordHash: "h"}, true},
+		"plain password":     {Config{Ingest: auth, AuthUser: "u", AuthPassword: "p"}, false},
+		"no auth at all":     {Config{Ingest: auth}, false},
 	}
 	for name, tc := range cases {
 		err := tc.cfg.Validate()
@@ -275,4 +288,56 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestIngestTokenIsBoundToItsProber(t *testing.T) {
+	auth := newIngestAuth(t, map[string]string{
+		"prober-a": "token-a",
+		"prober-b": "token-b",
+	})
+	h := newTestHandler(t, Config{Ingest: auth})
+
+	body, _ := json.Marshal(sampleBatch(time.Now().UTC())) // claims to be prober-a
+
+	if rec := postIngest(t, h, "token-b", body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("prober-b's token for prober-a's history: status = %d, want 401", rec.Code)
+	}
+	if rec := postIngest(t, h, "token-a", body); rec.Code != http.StatusNoContent {
+		t.Fatalf("own token: status = %d, want 204", rec.Code)
+	}
+}
+
+func TestRevokedIngestTokenIsRejectedWithoutRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("prober-a=token-a\n"), 0o600); err != nil {
+		t.Fatalf("write tokens: %v", err)
+	}
+
+	now := time.Unix(1_000_000, 0)
+	auth, err := ingestauth.New(ingestauth.Options{
+		File: path,
+		Now:  func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("ingestauth.New: %v", err)
+	}
+	h := newTestHandler(t, Config{Ingest: auth})
+
+	body, _ := json.Marshal(sampleBatch(time.Now().UTC()))
+	if rec := postIngest(t, h, "token-a", body); rec.Code != http.StatusNoContent {
+		t.Fatalf("valid token: status = %d, want 204", rec.Code)
+	}
+
+	// Rotate the prober out of the file; no restart, no new process.
+	if err := os.WriteFile(path, []byte("prober-a=rotated\n"), 0o600); err != nil {
+		t.Fatalf("rewrite tokens: %v", err)
+	}
+	now = now.Add(2 * ingestauth.DefaultTTL)
+
+	if rec := postIngest(t, h, "token-a", body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token: status = %d, want 401 within one TTL", rec.Code)
+	}
+	if rec := postIngest(t, h, "rotated", body); rec.Code != http.StatusNoContent {
+		t.Fatalf("rotated token: status = %d, want 204", rec.Code)
+	}
 }

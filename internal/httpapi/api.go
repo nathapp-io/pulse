@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"pulse/internal/ingestauth"
 	"pulse/internal/model"
 	"pulse/internal/ui"
 	"pulse/internal/viewer"
@@ -21,8 +22,9 @@ import (
 
 // Config is the API's authentication and limit configuration.
 type Config struct {
-	// IngestToken is the bearer token probers must present. Required.
-	IngestToken string
+	// Ingest authorises prober pushes, optionally binding each token to one
+	// prober name. Required: an open ingest endpoint accepts fabricated history.
+	Ingest *ingestauth.Store
 	// AuthUser and one of AuthPassword / AuthPasswordHash gate the read API.
 	AuthUser         string
 	AuthPassword     string
@@ -36,8 +38,8 @@ type Config struct {
 // Validate fails fast on a configuration that would be unsafe to serve.
 func (c Config) Validate() error {
 	var errs []error
-	if strings.TrimSpace(c.IngestToken) == "" {
-		errs = append(errs, errors.New("PULSE_INGEST_TOKEN is required: an open ingest endpoint accepts fabricated history"))
+	if c.Ingest == nil {
+		errs = append(errs, errors.New("no ingest tokens configured: an open ingest endpoint accepts fabricated history"))
 	}
 	if c.AuthUser != "" && c.AuthPassword == "" && c.AuthPasswordHash == "" {
 		errs = append(errs, errors.New("PULSE_AUTH_USER is set but neither PULSE_AUTH_PASSWORD nor PULSE_AUTH_PASSWORD_HASH is"))
@@ -46,6 +48,15 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("set only one of PULSE_AUTH_PASSWORD and PULSE_AUTH_PASSWORD_HASH"))
 	}
 	return errors.Join(errs...)
+}
+
+// bearerToken extracts the token from an "Authorization: Bearer x" header.
+func bearerToken(header string) string {
+	const prefix = "bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(prefix):])
 }
 
 type handler struct {
@@ -149,8 +160,8 @@ func (h *handler) ingest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if subtle.ConstantTimeCompare([]byte(token), []byte(h.cfg.IngestToken)) != 1 {
+	token := bearerToken(r.Header.Get("Authorization"))
+	if token == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -165,6 +176,14 @@ func (h *handler) ingest(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&batch); err != nil {
 		h.logger.Warn("ingest rejected", "error", err)
 		http.Error(w, "invalid batch: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Authorise once the sender's claimed name is known: a token bound to one
+	// prober must not be usable to write history for another.
+	if !h.cfg.Ingest.Authorize(batch.Prober.Name, token) {
+		h.logger.Warn("ingest rejected", "prober", batch.Prober.Name, "reason", "token not valid for this prober")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if err := batch.Validate(); err != nil {
