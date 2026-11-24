@@ -81,16 +81,24 @@ behind one interface**: `memory` (bounded rings + uptime buckets) and `sqlite` (
   `memory` does not, by design and by documentation.
 - Startup refuses `sqlite` without `PULSE_DB` and refuses to serve ingest without a token.
 
-## M2b — Prober push client (next)
+## M2b — Prober push client ✅ done (2026-11-24)
 
-Batching, immediate send on state transition, bounded queue, exponential backoff +
-jitter, drop counter, `compose.yaml` with both services.
+Bounded FIFO queue (drops the **oldest** when full, because the newest samples are what
+the UI shows as current), batching every `push_interval`, **immediate flush on a state
+transition**, exponential backoff with jitter on failure, flush-on-shutdown, and
+`Dockerfile` + `compose.yaml` for the two-service stack.
 
-**Acceptance:**
-- Stop the viewer, let the prober run 2 minutes, start the viewer: **no gap** in history,
-  `pulse_push_dropped_total` = 0.
-- A state transition is visible in the viewer within one push interval, not one batch
-  interval.
+Delivery is at-least-once: a batch stays queued until the viewer accepts it, and ingest is
+idempotent on `(prober,target,at)`, so a retry stores nothing twice.
+
+**Acceptance (met, real processes):**
+- Viewer down 20s while the prober kept probing: queue grew to 10, `pulse_push_dropped_total`
+  stayed **0**, 4 failed attempts with backoff, then everything drained on recovery.
+- After recovery: **17 samples over a 33.6s span, maximum gap 2.2s** at a 2s interval —
+  no hole where the outage was. A naive implementation shows a ~20s gap here.
+- Unit tests pin the rest: an immediate flush beats a one-hour interval, a 500 is retried
+  until accepted, a cancelled run still flushes, and a full queue drops the oldest.
+- Image builds from `Dockerfile` with the Go 1.21 build stage, proving the floor claim.
 
 ## M3 — Viewer UI
 

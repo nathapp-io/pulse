@@ -10,8 +10,8 @@ serves the UI. The viewer never connects back to a prober.
       │   │   │  active probes, per-target interval + jitter
  ┌────┴───┴───┴──────────┐    POST /api/v1/ingest      ┌───────────────────────┐
  │  pulse-prober         │    bearer token, batched    │  pulse-viewer         │
- │  one per network      │  ─────────────────────────► │  SQLite = history     │
- │  OUTBOUND ONLY (no    │    retry + backoff queue    │  embedded UI (uPlot)  │
+ │  one per network      │  ─────────────────────────► │  history: memory or   │
+ │  OUTBOUND ONLY (no    │    retry + backoff queue    │  SQLite, embedded UI  │
  │  inbound rule needed) │                             │  Basic auth from env  │
  │  /metrics on :8081    │                             │  /metrics (optional)  │
  └───────────┬───────────┘                             └───────────────────────┘
@@ -23,9 +23,11 @@ serves the UI. The viewer never connects back to a prober.
 - **Prober** (`pulse-prober`): config-driven, concurrent, single static binary,
   ~15–25 MB image. Holds only the current state + small uptime buckets for its own
   `/metrics`; ships every result to the viewer.
-- **Viewer** (`pulse-viewer`): ingest API + SQLite (pure-Go driver, no CGO) + static UI
-  embedded in the binary. No npm build step, no external database.
-- **Docker-first**: distroless non-root images, `compose.yaml`, Helm chart later.
+- **Viewer** (`pulse-viewer`): ingest API + **pluggable history** (`memory` or `sqlite`,
+  pure-Go driver so no CGO) + static UI embedded in the binary. No npm build step, no
+  external database.
+- **Docker-first**: distroless non-root images, `compose.yaml` for a two-service stack,
+  Helm chart later.
 
 Why push: probers sit inside LAN clusters behind NAT and need **zero inbound rules**;
 the viewer is the only thing exposed, so the attack surface and the trust boundary are
@@ -33,12 +35,23 @@ one component wide.
 
 ## Status
 
-**M1 (prober core) and M2a (viewer ingest + pluggable store) are implemented and tested.**
-M2b (prober push client) is next; the UI is M3.
+**M1 (prober core), M2a (viewer ingest + pluggable store) and M2b (prober push client,
+Docker, compose) are implemented and tested.** Next is M3, the UI.
 
 Storage is pluggable per deployment: `memory` keeps bounded rings in RAM (zero setup,
 history lost on restart) and `sqlite` persists to one file (durable). `PULSE_STORE`
 selects it; a `PULSE_DB` path implies sqlite, its absence implies memory.
+
+## Quick start
+
+```sh
+cp .env.example .env      # edit the secrets
+docker compose up -d --build
+curl -u admin:change-me http://localhost:8080/api/v1/status
+```
+
+The bundled prober probes two demo targets and pushes to the viewer every 10s. Replace
+[`deploy/prober.compose.yaml`](deploy/prober.compose.yaml) with your own targets.
 
 Measured 2026-11-24 against real local targets:
 
@@ -58,6 +71,9 @@ Measured 2026-11-24 against real local targets:
 | SQLite restart | 2 samples before, **2 after** |
 | Memory restart | 0 samples after, by design |
 | Bad config | refuses sqlite without `PULSE_DB`, refuses ingest without a token |
+| **Viewer outage, 20s** | prober queued **10**, dropped **0**, retried 4× with backoff; after recovery **17 samples over a 33.6s span, max gap 2.2s** — no hole in history |
+| Push on state change | flushes immediately instead of waiting for the batch interval |
+| Shutdown | flushes the queue before exiting |
 
 Decisions taken 2026-11-16:
 
