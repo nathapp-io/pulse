@@ -165,15 +165,44 @@ migration, so a database created by an earlier version opens and keeps working.
 **Deferred:** OIDC and the optional PromQL (`PROMETHEUS_URL`) history backend. Both need a
 real IdP / Prometheus to test against honestly, and neither is needed to run the stack.
 
-## M5 — Deploy & CI
+## M5 — Deploy & CI ✅ chart, CI and runbook done (2026-11-24)
 
-Helm chart matching the house conventions, GitLab CI (lint, `go test
--race`, buildx `linux/amd64,linux/arm64`), NetworkPolicy (prober egress → viewer ingress
-only), runbook.
+**Helm chart** (`deploy/helm/pulse`): viewer Deployment + Service + PVC + Secret, prober
+Deployment + generated ConfigMap, optional Ingress, ServiceAccount, and NetworkPolicies.
 
-**Acceptance:** chart installs on a k3s cluster; arm64 images run on cloud nodes; a prober
-inside the cluster reaches private `ClusterIP` targets while exposing no inbound port;
-viewer Ingress behind Traefik with TLS.
+Two things the chart refuses to do, because both corrupt or lose history silently:
+`viewer.replicaCount > 1` with `store: sqlite` (two writers on one file), and
+persistence enabled with `store: memory` (nothing would be written). It fails at render
+time with the reason, not at 3am.
+
+The NetworkPolicies encode the trust model: the **prober has an empty ingress rule** (no
+inbound at all, egress unrestricted because targets are arbitrary) and the **viewer
+accepts only probers from this release**, plus the ingress controller when an Ingress is
+enabled, with egress limited to DNS.
+
+**CI** (`.github/workflows/ci.yaml`): gofmt/vet/`go test -race` on the Go floor from
+`go.mod`, binaries build, the example config is parsed by the real binary, embedded UI
+assets exist; a helm job that lints, renders every variant, asserts both guards still
+fire, and feeds the chart-generated prober config back into `--check`; and a buildx job
+that builds `linux/amd64,linux/arm64` for both roles on every run and pushes to ghcr only
+off pull requests.
+
+**Runbook** (`docs/runbook.md`): what runs where, first-run checklist, reading the six
+target states and the error classes, "everything is STALE" triage, token rotation with and
+without a restart, password rotation, disk/retention math, backup/restore with the
+one-writer rule, upgrades and migrations, limits, and what to alert on.
+
+**Acceptance (verified here):** `helm lint` clean; every variant renders; both guards
+fire; the rendered prober config passes `pulse-prober --check`; `helm install
+--dry-run=server` against a real cluster API succeeds, so the manifests pass API-server
+validation and admission; `actionlint` clean and the helm job's steps executed locally;
+both roles cross-compile to statically linked `x86-64` and `aarch64` binaries, which is
+what the multi-arch image depends on.
+
+**Not verified here:** a real cluster install (needs published images plus a namespace
+decision) and the multi-platform *manifest* build (the buildx container driver must pull
+`moby/buildkit`, which this non-interactive session cannot authenticate for). Both are
+covered by the CI pipeline.
 
 ## Testing strategy
 

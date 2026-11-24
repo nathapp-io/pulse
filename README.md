@@ -31,7 +31,7 @@ serves the UI. The viewer never connects back to a prober.
   p50/p95, and a latency chart per target from the history API. **28 KB gzipped** in
   total. Behind the same Basic auth as the API.
 - **Docker-first**: distroless non-root images, `compose.yaml` for a two-service stack,
-  Helm chart later.
+  and a Helm chart with NetworkPolicies that give the prober no inbound rule at all.
 
 Why push: probers sit inside LAN clusters behind NAT and need **zero inbound rules**;
 the viewer is the only thing exposed, so the attack surface and the trust boundary are
@@ -40,7 +40,8 @@ one component wide.
 ## Status
 
 **M1 (prober core), M2a (viewer ingest + pluggable store), M2b (prober push client,
-Docker, compose) and M3 (the UI) are implemented and tested.**
+Docker, compose), M3 (the UI), M4 (maintenance windows, per-prober tokens) and M5 (Helm
+chart, CI, runbook) are implemented and tested.**
 
 Storage is pluggable per deployment: `memory` keeps bounded rings in RAM (zero setup,
 history lost on restart) and `sqlite` persists to one file (durable). `PULSE_STORE`
@@ -87,6 +88,10 @@ Measured 2026-11-24 against real local targets:
 | Token revocation | old token 401, rotated token 204, wrong prober name 401 — no restart, within the 2s TTL |
 | Token binding | a token for one prober cannot write another prober's history |
 | SQLite migration | a database created before `results.maintenance` existed opens and ingests |
+| Helm chart | `lint` clean, every variant renders, both safety guards fire, `install --dry-run=server` accepted by a real API server |
+| Chart-generated config | rendered prober config passes `pulse-prober --check` |
+| Multi-arch | both roles cross-compile to static `x86-64` and `aarch64` binaries |
+| CI | `actionlint` clean; the helm job's steps run green locally |
 
 Decisions taken 2026-11-16:
 
@@ -100,6 +105,22 @@ Decisions taken 2026-11-16:
 | D6 | Scale: **under 100 targets** — one writer, batched inserts, simple retention. |
 | D7 | **Maintenance windows stop alarms, not recording.** Results inside a window are stored and flagged; the viewer shows MAINTENANCE and does not count the target DOWN. Raw results are never rewritten. |
 | D8 | **Ingest tokens are per prober** (`prober=token`), and revocable from a file without a restart; one shared token stays available for simple setups. |
+
+## Deploy
+
+```sh
+# two containers, e.g. on one host
+docker compose up -d --build
+
+# or Kubernetes
+helm upgrade --install pulse deploy/helm/pulse -n monitoring --create-namespace \
+  --set viewer.auth.password='...' -f my-values.yaml
+```
+
+The chart refuses to render when the configuration would silently lose history
+(`sqlite` with more than one viewer replica, or persistence enabled with the `memory`
+store). Operations, triage and rotation procedures are in
+[`docs/runbook.md`](docs/runbook.md).
 
 ## Viewer storage
 
