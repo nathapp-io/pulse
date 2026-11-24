@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pulse.fullname" . }}-prober
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prober
+spec:
+  replicas: {{ .Values.prober.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prober
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: prober
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/viewer-secret.yaml") . | sha256sum }}
+        {{- if not .Values.prober.existingConfigMap }}
+        checksum/config: {{ include (print $.Template.BasePath "/prober-configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.prober.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "pulse.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: prober
+          image: {{ include "pulse.proberImage" . }}
+          imagePullPolicy: {{ .Values.prober.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --config
+            - /etc/pulse/config.yaml
+          ports:
+            # /metrics and /healthz only. Never exposed through a Service: the
+            # viewer learns everything by push, so the prober needs no inbound.
+            - name: metrics
+              containerPort: {{ .Values.prober.metricsPort }}
+              protocol: TCP
+          envFrom:
+            # Carries PULSE_INGEST_TOKEN, the only secret the prober needs.
+            - secretRef:
+                name: {{ include "pulse.ingestSecretName" . }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.prober.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pulse
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ default (printf "%s-prober" (include "pulse.fullname" .)) .Values.prober.existingConfigMap }}
+      {{- with .Values.prober.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prober.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prober.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

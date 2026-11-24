@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pulse.fullname" . }}-viewer
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: viewer
+spec:
+  replicas: {{ .Values.viewer.replicaCount }}
+  # sqlite + ReadWriteOnce: a rolling update must release the volume before the
+  # replacement takes it, otherwise the new pod sits Pending.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: viewer
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: viewer
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/viewer-secret.yaml") . | sha256sum }}
+        {{- with .Values.viewer.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "pulse.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: viewer
+          image: {{ include "pulse.viewerImage" . }}
+          imagePullPolicy: {{ .Values.viewer.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.viewer.port }}
+              protocol: TCP
+          env:
+            - name: PULSE_LISTEN
+              value: ":{{ .Values.viewer.port }}"
+            - name: PULSE_LOG_LEVEL
+              value: {{ .Values.viewer.logLevel }}
+            - name: PULSE_STORE
+              value: {{ .Values.viewer.store }}
+            {{- if eq .Values.viewer.store "sqlite" }}
+            - name: PULSE_DB
+              value: {{ .Values.viewer.dbPath }}
+            {{- end }}
+            - name: PULSE_RETENTION_RAW
+              value: {{ .Values.viewer.retention.raw }}
+            - name: PULSE_RETENTION_1M
+              value: {{ .Values.viewer.retention.oneMinute }}
+            - name: PULSE_RETENTION_1H
+              value: {{ .Values.viewer.retention.oneHour }}
+            - name: PULSE_STALE_AFTER
+              value: {{ .Values.viewer.staleAfter }}
+            - name: PULSE_EXPECTED_PROBERS
+              value: {{ include "pulse.expectedProbers" . | quote }}
+            - name: PULSE_AUTH_USER
+              value: {{ .Values.viewer.auth.user | quote }}
+            {{- if .Values.viewer.ingest.existingTokensSecret }}
+            - name: PULSE_INGEST_TOKENS_FILE
+              value: /etc/pulse/ingest-tokens
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "pulse.viewerSecretName" . }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.viewer.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pulse
+            {{- if .Values.viewer.ingest.existingTokensSecret }}
+            - name: ingest-tokens
+              mountPath: /etc/pulse
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.viewer.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "pulse.fullname" . }}-viewer
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.viewer.ingest.existingTokensSecret }}
+        - name: ingest-tokens
+          secret:
+            secretName: {{ .Values.viewer.ingest.existingTokensSecret }}
+            items:
+              - key: {{ .Values.viewer.ingest.tokensSecretKey }}
+                path: ingest-tokens
+        {{- end }}
+      {{- with .Values.viewer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.viewer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.viewer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

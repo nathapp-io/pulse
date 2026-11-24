@@ -1,0 +1,64 @@
+{{- if .Values.networkPolicy.enabled }}
+# The prober dials out and accepts nothing: no inbound rule exists for it, so a
+# compromised prober cannot be a listener. Its egress is unrestricted because
+# targets are arbitrary and can live anywhere the cluster can reach.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pulse.fullname" . }}-prober
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prober
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - {}
+---
+# The viewer accepts pushes only from this release's probers, plus the ingress
+# controller when an Ingress is enabled. Everything else stays shut.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pulse.fullname" . }}-viewer
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: viewer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "pulse.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: prober
+      ports:
+        - protocol: TCP
+          port: {{ .Values.viewer.port }}
+    {{- if .Values.ingress.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.viewer.port }}
+    {{- end }}
+  egress:
+    # DNS only: the viewer answers requests, it never calls out.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

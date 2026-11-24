@@ -1,0 +1,34 @@
+pulse is installed.
+
+Viewer (the only exposed component):
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  https://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "pulse.viewerServiceName" . }} {{ .Values.viewer.port }}:{{ .Values.viewer.port }}
+  then open http://localhost:{{ .Values.viewer.port }}/
+{{- end }}
+
+Sign in with HTTP Basic auth:
+  user:     {{ .Values.viewer.auth.user }}
+  password: {{ if .Values.viewer.auth.passwordHash }}(the one matching PULSE_AUTH_PASSWORD_HASH){{ else }}{{ .Values.viewer.auth.password | default "(set viewer.auth.password or viewer.auth.existingSecret)" }}{{ end }}
+
+Prober ingest token (the prober reads it from its own Secret):
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "pulse.viewerSecretName" . }} \
+    -o jsonpath='{.data.PULSE_INGEST_TOKEN}' | base64 -d; echo
+
+Prober: {{ .Values.prober.name }} ({{ .Values.prober.replicaCount }} replica(s)), probing
+{{ len .Values.prober.probes }} target(s) every push_interval={{ .Values.prober.pushInterval }}.
+It has no Service and no inbound rule: it only dials out.
+
+{{- if eq (len .Values.prober.probes) 0 }}
+NOTE: prober.probes is empty, so the prober is running with no targets. Add yours
+under prober.probes in your values file.
+{{- end }}
+
+History: store={{ .Values.viewer.store }}{{ if eq .Values.viewer.store "sqlite" }}, volume
+{{ include "pulse.fullname" . }}-viewer ({{ .Values.viewer.persistence.size }}{{ if .Values.viewer.persistence.keepOnDelete }}, kept on uninstall){{ end }}{{ else }}, in memory: LOST on restart{{ end }}.
+
+Revoking a prober token: edit the tokens file/Secret -- no restart and no new
+`helm upgrade` is needed. See docs/runbook.md.

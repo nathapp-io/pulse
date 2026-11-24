@@ -1,0 +1,33 @@
+{{- if not .Values.prober.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pulse.fullname" . }}-prober
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prober
+data:
+  # Generated from values. The viewer URL, name and ports come from the chart so
+  # they cannot drift; only the probes are yours.
+  config.yaml: |
+    prober:
+      name: {{ .Values.prober.name }}
+      metrics_listen: ":{{ .Values.prober.metricsPort }}"
+      max_concurrent_probes: {{ .Values.prober.maxConcurrentProbes }}
+      {{- with .Values.prober.labels }}
+      labels:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    viewer:
+      url: http://{{ include "pulse.viewerServiceName" . }}:{{ .Values.viewer.port }}/api/v1/ingest
+      push_interval: {{ .Values.prober.pushInterval }}
+      push_timeout: {{ .Values.prober.pushTimeout }}
+      queue_size: {{ .Values.prober.queueSize }}
+      token_env: {{ .Values.prober.tokenEnv }}
+    {{- with .Values.prober.probes }}
+    probes:
+      {{- toYaml . | nindent 6 }}
+    {{- else }}
+    probes: []
+    {{- end }}
+{{- end }}

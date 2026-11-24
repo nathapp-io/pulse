@@ -1,0 +1,15 @@
+apiVersion: v2
+name: pulse
+description: Push-based uptime monitoring - a prober that probes and pushes, a viewer that stores and serves.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/nathapp-io/pulse
+sources:
+  - https://github.com/nathapp-io/pulse
+keywords:
+  - monitoring
+  - uptime
+  - prometheus
+maintainers:
+  - name: nathapp-io

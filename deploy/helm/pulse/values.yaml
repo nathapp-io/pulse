@@ -1,0 +1,155 @@
+# Default values for pulse.
+#
+# Two workloads, one history owner:
+#   viewer - receives pushes, owns history, serves the UI. The only thing exposed.
+#   prober - probes targets and pushes. Needs no inbound rule at all.
+#
+# The viewer is a single writer. With the sqlite store, replicas must stay at 1:
+# two pods on a ReadWriteOnce volume would corrupt each other's history.
+
+viewer:
+  image:
+    repository: ghcr.io/nathapp-io/pulse-viewer
+    # Defaults to .Chart.AppVersion when empty.
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 8080
+  store: sqlite
+  dbPath: /var/lib/pulse/pulse.db
+  retention:
+    raw: 168h      # 7d
+    oneMinute: 720h  # 30d
+    oneHour: 8760h   # 365d
+  staleAfter: 60s
+  # Probers that must check in; a declared-but-silent one shows as MISSING, which
+  # is the failure that otherwise looks like "no problem here".
+  expectedProbers: []
+  logLevel: info
+
+  auth:
+    # Basic auth for the UI and read API. Either set password here (a Secret is
+    # created) or point at one you manage with existingSecret.
+    existingSecret: ""
+    user: admin
+    password: ""
+    passwordHash: ""
+
+  ingest:
+    # Tokens probers present. Leave empty to let the chart generate a random one.
+    existingSecret: ""
+    # Shared token: any prober name may use it.
+    token: ""
+    # Tokens bound to prober names, e.g.
+    #   tokens: "prober-core=tok1,prober-edge=tok2"
+    tokens: ""
+    # Revocation without a restart: mount "prober=token" lines from a Secret and
+    # they are re-read every 2s. Takes precedence over token/tokens when set.
+    existingTokensSecret: ""
+    tokensSecretKey: ingest-tokens
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    # Keep the PVC on `helm uninstall` when the history must survive a reinstall.
+    keepOnDelete: true
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+prober:
+  image:
+    repository: ghcr.io/nathapp-io/pulse-prober
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # Name reported to the viewer; must match viewer.expectedProbers when set.
+  name: prober
+  labels: {}
+  metricsPort: 8081
+  maxConcurrentProbes: 32
+  pushInterval: 10s
+  pushTimeout: 5s
+  queueSize: 10000
+  # Env var the ingest token is read from; never put the token in the config.
+  tokenEnv: PULSE_INGEST_TOKEN
+
+  # Probes, as they appear under `probes:` in the prober config. The viewer URL,
+  # name, labels and metrics port are filled in from the values above.
+  probes: []
+  #  - name: api
+  #    group: web
+  #    type: http
+  #    url: https://example.com/
+  #    expect:
+  #      status: [200]
+  #      body_regex: '"status":"ok"'
+
+  # Use your own ConfigMap (key: config.yaml) instead of generating one.
+  existingConfigMap: ""
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # TLS is terminated by the ingress controller; the viewer itself speaks HTTP.
+  hosts:
+    - host: pulse.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: pulse-tls
+  #    hosts: [pulse.example.com]
+
+networkPolicy:
+  # Deny-all inbound for probers (they only dial out) and restrict viewer ingress
+  # to probers plus the ingress controller.
+  enabled: true
+  # Namespace labels allowed to reach the viewer UI/API through the ingress.
+  ingressControllerNamespaceLabels:
+    kubernetes.io/metadata.name: ingress-nginx
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

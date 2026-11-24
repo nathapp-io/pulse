@@ -1,0 +1,149 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # The module declares go 1.21; the pipeline must prove that floor rather than
+  # build with whatever the runner happens to have.
+  GOFLAGS: -mod=mod
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - name: tests (race)
+        run: go test -race -count=1 ./...
+
+      - name: binaries build
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/pulse-prober ./cmd/prober
+          CGO_ENABLED=0 go build -trimpath -o /tmp/pulse-viewer ./cmd/viewer
+
+      - name: example config still parses
+        run: go run ./cmd/prober --config config.example.yaml --check
+
+      - name: embedded UI assets present
+        run: |
+          for asset in index.html app.js styles.css vendor/uplot.iife.min.js vendor/uplot.LICENSE; do
+            test -s "internal/ui/static/$asset" || { echo "missing $asset"; exit 1; }
+          done
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: lint
+        run: helm lint deploy/helm/pulse
+
+      - name: render (defaults, ingress, tokens file)
+        run: |
+          helm template pulse deploy/helm/pulse > /dev/null
+          helm template pulse deploy/helm/pulse --set ingress.enabled=true > /dev/null
+          helm template pulse deploy/helm/pulse \
+            --set viewer.ingest.existingTokensSecret=pulse-ingest > /dev/null
+
+      - name: the guards must hold
+        run: |
+          # sqlite with two writers would corrupt history: the chart must refuse.
+          if helm template pulse deploy/helm/pulse --set viewer.replicaCount=2 > /dev/null 2>&1; then
+            echo "chart accepted sqlite with 2 replicas"
+            exit 1
+          fi
+          if helm template pulse deploy/helm/pulse --set viewer.store=memory > /dev/null 2>&1; then
+            echo "chart accepted persistence with the memory store"
+            exit 1
+          fi
+
+      - name: rendered prober config loads in the prober
+        run: |
+          helm template pulse deploy/helm/pulse \
+            --set 'prober.probes[0].name=web' \
+            --set 'prober.probes[0].type=http' \
+            --set 'prober.probes[0].url=https://example.com/' > /tmp/rendered.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open("/tmp/rendered.yaml")) if d]
+          cm = next(d for d in docs if d["kind"] == "ConfigMap")
+          open("/tmp/prober-config.yaml", "w").write(cm["data"]["config.yaml"])
+          PY
+          go run ./cmd/prober --config /tmp/prober-config.yaml --check
+
+  images:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [viewer, prober]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: log in to ghcr
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.role }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Both architectures are built on every run; only publishing needs
+          # credentials, so a pull request still proves the build works.
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            ROLE=${{ matrix.role }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.role }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.role }}
