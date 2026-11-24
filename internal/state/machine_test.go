@@ -37,8 +37,8 @@ func TestFailureStreakResets(t *testing.T) {
 	base := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	m := New(2, 1)
 
-	m.Observe(true, base)                  // UNKNOWN -> UP
-	m.Observe(false, base.Add(time.Minute)) // one failure
+	m.Observe(true, base)                    // UNKNOWN -> UP
+	m.Observe(false, base.Add(time.Minute))  // one failure
 	m.Observe(true, base.Add(2*time.Minute)) // resets the streak
 	if got, _ := m.Snapshot(); got != Up {
 		t.Fatalf("state = %s, want UP", got)

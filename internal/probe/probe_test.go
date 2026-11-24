@@ -272,12 +272,12 @@ func TestTCP(t *testing.T) {
 	addr := l.Addr().String()
 
 	p := &config.Probe{
-		Name:       "db",
-		Group:      "test",
-		Type:       "tcp",
-		Address:    addr,
-		Interval:   config.Duration(30 * time.Second),
-		Timeout:    config.Duration(time.Second),
+		Name:        "db",
+		Group:       "test",
+		Type:        "tcp",
+		Address:     addr,
+		Interval:    config.Duration(30 * time.Second),
+		Timeout:     config.Duration(time.Second),
 		ConfirmDown: 2,
 		ConfirmUp:   1,
 	}
