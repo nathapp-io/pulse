@@ -100,7 +100,7 @@ rows and keeps rollups; a revoked prober token is rejected within one push inter
 
 ## M5 — Deploy & CI
 
-Helm chart matching the house Helm chart conventions, GitLab CI (lint, `go test
+Helm chart matching the house conventions, GitLab CI (lint, `go test
 -race`, buildx `linux/amd64,linux/arm64`), NetworkPolicy (prober egress → viewer ingress
 only), runbook.
 
