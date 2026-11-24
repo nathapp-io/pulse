@@ -64,7 +64,7 @@ Measured 2026-11-24 against real local targets:
 | Check | Result |
 |---|---|
 | `go vet ./...` | clean |
-| `go test -race ./...` | 62 tests, 10 packages, all pass; both storage backends run the same suite |
+| `go test -race ./...` | 79 tests, 11 packages, all pass; both storage backends run the same suite |
 | Static binary (macOS arm64) | 14 MB prober, no CGO |
 | 100 targets @ 5s intervals | **22.8 MB RSS** (budget was 60 MB) |
 | Error classification | `HTTP_STATUS`, `CONNECT_REFUSED`, `ASSERT_FAIL` all correct on live probes |
@@ -82,6 +82,11 @@ Measured 2026-11-24 against real local targets:
 | Shutdown | flushes the queue before exiting |
 | UI | 200 behind auth, 401 without; unknown paths 404; **28.3 KB gzipped** in total |
 | UI in containers | both demo targets render UP at 100% 1h uptime, prober HEALTHY, detail chart fed by the history API |
+| Assertion failure | 200 with a body that fails `body_regex` → `ASSERT_FAIL`, not UP |
+| Maintenance window | target shown **MAINTENANCE**, not counted DOWN, results still recorded and flagged |
+| Token revocation | old token 401, rotated token 204, wrong prober name 401 — no restart, within the 2s TTL |
+| Token binding | a token for one prober cannot write another prober's history |
+| SQLite migration | a database created before `results.maintenance` existed opens and ingests |
 
 Decisions taken 2026-11-16:
 
@@ -93,6 +98,8 @@ Decisions taken 2026-11-16:
 | D4 | Viewer auth: **HTTP Basic from env** (`PULSE_AUTH_USER` / `PULSE_AUTH_PASSWORD`, or `PULSE_AUTH_PASSWORD_HASH` for bcrypt). |
 | D5 | Prober placement is a deployment-time decision; nothing in the design assumes it. |
 | D6 | Scale: **under 100 targets** — one writer, batched inserts, simple retention. |
+| D7 | **Maintenance windows stop alarms, not recording.** Results inside a window are stored and flagged; the viewer shows MAINTENANCE and does not count the target DOWN. Raw results are never rewritten. |
+| D8 | **Ingest tokens are per prober** (`prober=token`), and revocable from a file without a restart; one shared token stays available for simple setups. |
 
 ## Viewer storage
 

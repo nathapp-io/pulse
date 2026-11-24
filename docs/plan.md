@@ -127,15 +127,43 @@ shows HEALTHY, and the history endpoint returns the samples the detail chart plo
 **Deferred:** grouping cards by `group`, TLS days-left, an incident timeline, 7d rollup
 charts, a light theme, and gzip (responses are served identity-encoded).
 
-## M4 — Assertions, retention, auth hardening
+## M4 — Maintenance windows, ingest auth, retention ✅ done (2026-11-24)
 
-Body regex / JSON path / header assertions wired end-to-end, `tls_expiry_min` warnings,
-maintenance windows, retention jobs + documented sizing, per-prober ingest tokens,
-optional OIDC (any OIDC IdP), optional PromQL backend (`PROMETHEUS_URL`).
+Assertions (`status`, `body_regex`, dotted `json_path`, header regex, `tls_expiry_min`) and
+retention pruning of raw rows plus 1m/1h rollups already existed from M1/M2; this
+milestone closed the two gaps that made them unusable in practice, and verified the rest
+end to end.
 
-**Acceptance:** a 200 with a wrong body is `ASSERT_FAIL` in the UI; a target in a
-maintenance window still records results but is not counted as DOWN; retention prunes raw
-rows and keeps rollups; a revoked prober token is rejected within one push interval.
+**Maintenance windows.** `maintenance:` on a probe is now honoured instead of parsed and
+ignored. The prober flags each result taken inside a window; the viewer shows the target
+as **MAINTENANCE** and stops counting it as DOWN. The raw result is not rewritten: history
+still records that the probe failed, so a planned outage is not hidden from a later
+investigation — only from the alarm counters. STALE outranks MAINTENANCE, because when the
+prober itself is silent, freshness is the more important fact.
+
+**Per-prober ingest tokens.** `PULSE_INGEST_TOKENS` binds a token to a prober name, so a
+token leaked from one prober cannot fabricate history for another. `PULSE_INGEST_TOKEN`
+still works as one shared token. `PULSE_INGEST_TOKENS_FILE` is re-read every 2s, because a
+revoked token has to stop working without restarting the viewer. A file that becomes
+unreadable or malformed keeps the **last good** token set and logs a warning — a typo in
+that file must not lock every prober out.
+
+**Storage.** SQLite gained a `results.maintenance` column with an idempotent `ALTER TABLE`
+migration, so a database created by an earlier version opens and keeps working.
+
+**Acceptance (met, real processes):**
+- A target returning **200 with a body that fails its regex** reports `ASSERT_FAIL` in the
+  status API and therefore in the UI.
+- A target inside its window, whose endpoint is actually refusing connections, reports
+  **MAINTENANCE**: `down` stays 0 for it, `maintenance` is 1, and its 5 recorded history
+  samples are flagged `maintenance: true` while still `ok: false`.
+- Editing the tokens file revokes a token: old token 401, rotated token 204, and a valid
+  token presented under a different prober name 401. The running prober's
+  `pulse_push_failures_total` climbs within one push interval, and its queue holds the
+  results rather than losing them.
+
+**Deferred:** OIDC and the optional PromQL (`PROMETHEUS_URL`) history backend. Both need a
+real IdP / Prometheus to test against honestly, and neither is needed to run the stack.
 
 ## M5 — Deploy & CI
 

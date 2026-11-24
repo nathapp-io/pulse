@@ -5,7 +5,7 @@
 prober:
   name: prober-cloud            # unique; the viewer attributes every result to it
   labels:                        # optional, travel with every push
-    region: oci-apse
+    region: dc-1
   metrics_listen: ":8081"        # /metrics + /healthz (Prometheus later; viewer never uses it)
   max_concurrent_probes: 32
 
@@ -16,6 +16,11 @@ viewer:
   queue_size: 10000              # bounded FIFO while the viewer is unreachable
   token_env: PULSE_INGEST_TOKEN  # token is read from this env var, never from the file
   # tls_insecure_skip_verify: false
+
+# maintenance:                   # planned windows: still recorded, not counted DOWN
+#   - from: 2026-12-01T00:00:00Z
+#     to: 2026-12-01T03:00:00Z
+#     reason: monthly patching
 
 defaults:                        # per-target keys override these
   interval: 30s
@@ -51,7 +56,7 @@ probes:
       body_regex: "(?i)healthy"
 
   # ---------------------------------------------------------------- TCP port
-  - name: postgres-oci
+  - name: postgres-primary
     group: data
     type: tcp
     address: 192.0.2.10:5432
@@ -66,7 +71,7 @@ probes:
 
   # ---------------------------------------------------------------- ICMP (opt-in)
   # Requires CAP_NET_RAW / container `cap_add: [NET_RAW]`.
-  # - name: gateway-oci
+  # - name: gateway-edge
   #   group: network
   #   type: icmp
   #   address: 203.0.113.10
