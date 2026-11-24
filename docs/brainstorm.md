@@ -1,14 +1,15 @@
 # pulse — design brainstorm
 
 Date: 2026-11-16
-Status: proposal, awaiting decisions (see [Open questions](#12-open-questions))
+Status: v1 design settled (see [Decisions](#11-decisions)); open questions in
+[§12](#12-open-questions)
 
 ## 1. Problem
 
-There is no black-box monitoring today. Kubernetes liveness/readiness only tells you a
-pod answers; it does not tell you that a public hostname answers, that TLS is about to
-expire, that a Postgres port is reachable from the LAN, or that yesterday the API was
-down for 20 minutes. Incidents are currently found by users.
+There is no black-box monitoring today. Kubernetes liveness/readiness only proves a pod
+answers; it does not prove that a public hostname answers, that TLS is not about to
+expire, that a Postgres port is reachable from the LAN, or that the API was down for 20
+minutes yesterday. Incidents are currently discovered by users.
 
 Goal: a small, owned tool that answers *"is it up, since when, from where, and how
 fast"* for a configurable list of targets.
@@ -17,179 +18,228 @@ fast"* for a configurable list of targets.
 
 ### Stated
 - **Exporter** — probes health over TCP/HTTP(S), **multiple configurable entries**,
-  exports metrics/status.
-- **Viewer** — displays the collected metrics/status.
+  exports metrics/status. **Pushes** results to the viewer.
+- **Viewer** — displays collected status, **never accesses an exporter directly**.
 - Dockerizable, lightweight.
+- **v1 UI-only** — no alerting.
+- Viewer login: **Basic auth configured via environment**.
+- Prober placement: decided at deployment time.
 
-### Implied (from the environment and how these tools are actually used)
+### Implied
 - **Per-target config**: interval, timeout, expectations, headers/auth.
 - **Error classification**, not just up/down — DNS vs connect vs TLS vs status vs
   assertion failure. "down" alone sends you looking in the wrong place.
-- **Uptime over time** (rolling windows) and **latency history** for the UI.
-- **TLS certificate expiry** — the cheapest win available for HTTPS targets.
-- **Flap damping** — a target goes DOWN after N consecutive failures, not one.
-- **Runs next to its targets**. With 2× LAN k3s + 1× OCI k8s, a central prober cannot
-  reach private addresses (`192.0.2.10:5432`) in every network. ⇒ *many probers, one
-  viewer*.
-- **Prometheus-compatible `/metrics`** — the platform plan already targets
-  kube-prometheus-stack + Grafana "later"; the exporter should slot in without
-  rewriting it.
+- **Uptime over rolling windows** and **latency history** for the UI.
+- **TLS certificate expiry**, the cheapest win available on HTTPS targets.
+- **Flap damping** — DOWN after N consecutive failures, not one.
+- **Prometheus-compatible `/metrics`** on the prober, because the platform plan already
+  targets kube-prometheus-stack + Grafana "later". Independent of the push path.
 
-### Explicit non-goals for v1
-- Log collection (that is Loki), metrics scraping of other exporters (`node_exporter`),
-  distributed tracing.
-- Long-term time-series storage — Prometheus owns that. `pulse` keeps only a bounded
-  in-memory window.
-- Synthetics with browser rendering (that is Playwright territory).
+### Non-goals for v1
+- Alerting/notifications (explicitly deferred — interface only).
+- Log collection (Loki), scraping other exporters (`node_exporter`), tracing.
+- Long-term TSDB: the viewer keeps a bounded local history; Prometheus owns the rest.
+- Browser-rendered synthetics.
 
-## 3. Build vs. adopt — the honest comparison
+## 3. Build vs. adopt
 
 | Option | What it is | Why not just use it |
 |---|---|---|
-| **Uptime Kuma** | Node + SQLite, rich UI, notifications, the de-facto self-hosted uptime tool | 150–300 MB RAM, a DB you must back up, no Prometheus exposition, awkward to run one instance per cluster |
-| **Gatus** (Go) | Very close to this design: Go, YAML, endpoints + UI + alerts | Almost exactly what we are describing — worth a 1-week trial before writing code; the main reasons to build are the Prometheus `/metrics` contract, multi-prober aggregation, and full ownership of the alert path |
-| **blackbox_exporter** | Prometheus sidecar prober, canonical | No UI, no history without Prometheus, config in `prometheus.yml` crammed into query params — not a "view the status" product |
-| **Prometheus + alertmanager + Grafana** | The platform standard | Correct long-term target, but heavy for "is it up": 3 components + storage + alert rules before the first useful screen |
+| **Uptime Kuma** | Node + SQLite, rich UI + notifications | 150–300 MB RAM, pull-only, no Prometheus exposition, one instance per network |
+| **Gatus** (Go) | Closest prior art: Go, YAML, endpoints + UI | ~90% of this design. Legitimate fallback if v1 slips; reasons to build are the push model (NAT-friendly, zero inbound on probers), the Prometheus contract, and owning the code |
+| **blackbox_exporter** | Prometheus sidecar prober | Pull-only (needs inbound reach to every target's network), no UI, no history without Prometheus |
+| **Prometheus + Alertmanager + Grafana** | The platform standard | Correct long-term destination, but 3 components + storage + rules before the first useful screen |
 
-**Recommendation:** build it, because the deliverable is small (two Go binaries, no DB)
-and the two integration points we actually need — Prometheus exposition *and* a
-standalone viewer across clusters — are exactly what off-the-shelf tools each do only
-half of. But keep the Gatus trial as a fallback if v1 slips past ~2 weeks: the risk
-being managed is "we rebuilt Gatus with fewer features", and the mitigation is keeping
-the exporter's `/metrics` contract standard so a swap stays possible.
+**Recommendation: build**, but keep the `/metrics` contract standard so a future swap to
+Gatus/blackbox_exporter stays possible.
 
 ## 4. Language choice
 
-The deciding constraint is not raw speed — every probe is I/O-bound (DNS, TCP, TLS,
-HTTP). It is *footprint per container, concurrency ergonomics, and image size*.
+Probes are entirely I/O-bound, so the decision is footprint and iteration speed, not
+throughput.
 
-| | **Go** | **Rust** | **Node / Bun** |
+| | **Go** ✅ | Rust | Node / Bun |
 |---|---|---|---|
-| Binary / image size | 15–25 MB, static, distroless/scratch | 8–15 MB | 90–180 MB (runtime + deps) |
-| RSS at ~100 targets | 25–40 MB | 15–25 MB | 80–150 MB |
-| Concurrency model | goroutine per target — the natural fit | tokio; correct but more ceremony | event loop — fine at this scale |
-| Prometheus client | `prometheus/client_golang` (first-party) | `prometheus` crate (3rd party) | 3rd party |
-| Cross-compile linux/arm64 for OCI | `GOARCH=arm64`, no toolchain juggling | good, rustup targets | needs per-arch base image + native deps |
-| Dev velocity (config parsing, HTTP, TLS, tests) | high | medium (borrow checker, async lifetimes) | high |
-| Ecosystem prior art to borrow ideas from | blackbox_exporter, Gatus, Prometheus itself | limited | Uptime Kuma |
-| Ops story | one file, `docker run`, no runtime | one file | runtime inside image |
+| Image size | 15–25 MB static, distroless | 8–15 MB | 90–180 MB (runtime + deps) |
+| RSS @ ~100 targets | 25–40 MB | 15–25 MB | 80–150 MB |
+| Concurrency | goroutine per target — natural fit | tokio, more ceremony | event loop, fine at this scale |
+| Prometheus client | `client_golang` (first-party) | 3rd party | 3rd party |
+| arm64 for cloud nodes | `GOARCH=arm64`, no toolchain juggling | good | needs per-arch base image |
+| **CGO-free SQLite** | `modernc.org/sqlite` keeps distroless/static | `rusqlite` usually needs CGO or a C toolchain | `node:sqlite` fine but heavy image |
+| Dev velocity (config, HTTP, TLS, SQL, tests) | high | medium | high |
 
-**Verdict: Go for both components, vanilla JS + uPlot embedded for the UI.**
+**Verdict: Go for both binaries, vanilla JS + uPlot embedded for the UI.**
 
-- Rust wins only on memory, by ~10–20 MB per container, and loses on the thing this
-  project needs most: fast iteration on probe logic and an official metrics client.
-  There is no CPU-bound hot path to optimise.
-- Node/Bun is the right choice if the UI is the hard part — it isn't here (a target
-  grid + one chart), and the per-container RSS is 3–5× Go for no benefit.
-- Keeping the UI as **static assets embedded with `go:embed`** avoids an npm build
-  step, a `node_modules` tree, and a frontend toolchain — the single biggest source of
-  "lightweight" drift in this kind of project.
+- Rust wins ~10–20 MB RSS and loses iteration speed on a codebase with no CPU hot path.
+- Node/Bun is right only if the UI is the hard part; here it is a target grid and one
+  chart. It also costs 3–5× the RSS per container.
+- Embedding the UI with `go:embed` avoids npm/node_modules/a frontend toolchain — the
+  main way "lightweight" drifts in projects like this.
 
-**Local prerequisite:** neither `go` nor `rustc` is installed on this machine (Node
-v26 / Bun 1.4.5 are). Implementation needs `brew install go` (network access) or a
-`golang:1.24` container as the build environment.
+**Local prerequisite:** neither `go` nor `rustc` is installed on this machine (Node v26 /
+Bun 1.4.5 are). Implementation needs `brew install go` (network) or a `golang:1.24`
+build container.
 
-## 5. Architecture
+## 5. Architecture — why push changes more than the arrow direction
 
-Two binaries, one repo, shared `internal/` packages.
+### 5.1 What push buys
+- Probers need **no inbound rule, no public hostname, no TLS cert** — they work from a
+  NAT'd LAN cluster with egress only.
+- The **trust boundary is one component**: the viewer. Only it is exposed.
+- The viewer does not need network reachability *into* every cluster, which is what makes
+  the "LAN k3s + cloud k8s" topology cheap.
 
-### 5.1 Prober (exporter)
+### 5.2 What push costs — and how each cost is paid
+| Push failure mode | Handling |
+|---|---|
+| Viewer unreachable | Prober keeps probing and buffers results in a **bounded FIFO** (default 10k); exponential backoff + jitter; drops oldest first and increments `pulse_push_dropped_total`. Probing never blocks on the network. |
+| Viewer restarts | Queue drains; ingest is **idempotent** on `(prober, target, at)` so retries cannot double-count. |
+| Prober dies — *silence is ambiguous* | Viewer tracks `last_seen` per prober; targets go **`STALE`** (grey, not red) after `3 × push_interval`, and viewers listing `PULSE_EXPECTED_PROBERS` report a prober that has never checked in. Silence must be visible, not absent. |
+| Target removed from prober config | Prober reports its `config_hash` + target list; the viewer archives targets that disappeared instead of showing them stale forever. |
+| Clock skew / lag | Each result carries prober time; the viewer also stores `received_at` and surfaces ingest lag in the UI. |
+| One prober forging another's data | v1: single shared ingest token. Phase 4: per-prober tokens. |
 
-- **Config**: single YAML file, `--config`, hot reload on `SIGHUP` + file watch.
-  Invalid config never breaks a running process — keep last-good, log the diff.
-- **Scheduling**: one worker goroutine per target, ticker with jitter (±10%) to avoid
-  thundering herds; a global semaphore caps in-flight probes.
-- **Probe types**: `http`/`https`, `tcp`, `icmp` (opt-in; needs `NET_RAW`), later `dns`,
-  `grpc`.
-- **Assertions** (http): status-code set, body regex, JSON path equals/contains,
-  response-header check, `tls_expiry_min`.
-- **Error classes**: `OK`, `DNS_FAIL`, `CONNECT_REFUSED`, `CONNECT_TIMEOUT`,
-  `TLS_HANDSHAKE`, `TLS_EXPIRED`, `HTTP_TIMEOUT`, `HTTP_STATUS`, `ASSERT_FAIL`,
-  `BODY_TOO_LARGE`.
-- **Storage**: per-target ring buffer, default 1440 results (~92 KB/target at 30s ⇒
-  12 h), plus pre-aggregated 1m/5m/1h buckets for long-range uptime without unbounded
-  memory. 100 targets ≈ 9–12 MB.
-- **State machine**: `UNKNOWN → UP ⇄ DOWN`, DOWN requires `confirm_down` consecutive
-  failures; recovery requires `confirm_up`; maintenance windows suppress state changes
-  and alerting but still record probe results.
-- **Notifier** (phase 3): state transitions → generic webhook (JSON), Slack, Telegram.
+### 5.3 Components
 
-### 5.2 Viewer
+**Prober (exporter)**
+- YAML config, `--config`, reload on `SIGHUP` / file change; invalid config keeps the
+  last-good state and never stops the process.
+- One worker goroutine per target, ticker with ±10% jitter, global in-flight semaphore.
+- Probe types: `http`/`https`, `tcp`, `icmp` (opt-in, needs `NET_RAW`); later `dns`.
+- Assertions (http): status set, body regex, JSON path, header check, `tls_expiry_min`.
+- Error classes: `OK`, `DNS_FAIL`, `CONNECT_REFUSED`, `CONNECT_TIMEOUT`, `TLS_HANDSHAKE`,
+  `TLS_EXPIRED`, `HTTP_TIMEOUT`, `HTTP_STATUS`, `ASSERT_FAIL`, `BODY_TOO_LARGE`.
+- State machine `UNKNOWN → UP ⇄ DOWN` with `confirm_down`/`confirm_up` damping.
+- Holds **only** current state + uptime buckets (1m × 360 for 1h, 1h × 168 for 7d
+  ≈ 20 KB/target) so `/metrics` stays meaningful without a database.
+- Push client: batch every `push_interval` (default 10s) **plus immediately on a state
+  transition** (so a DOWN appears in seconds, not up to 10s later).
+- `GET /metrics`, `GET /healthz` on a **separate port** (`:8081`), for Prometheus later.
 
-- Polls `N` probers' `/api/v1/status` (interval configurable, default 10s), keeps the
-  aggregate in memory, serves the UI.
-- **Why a separate process** even though it could live in the prober: one viewer must
-  fan in probers from different networks/clusters, and the viewer is the only component
-  that needs auth, a public hostname and a stable URL.
-- UI (v1): target grid grouped by `group` with status pill, uptime % (1h/24h/7d), p50/p95
-  latency, sparkline, TLS days-left, last error class, incident timeline.
-- Optional later mode: PromQL backend when `PROMETHEUS_URL` is set — the viewer becomes
-  the single ops dashboard on top of the planned kube-prometheus-stack.
+**Viewer**
+- `POST /api/v1/ingest` — bearer token, batched, idempotent.
+- **SQLite** via `modernc.org/sqlite` (pure Go → static distroless image preserved):
+  `results` (raw, default 7d), `rollups_1m` (30d), `rollups_1h` (365d), `probers`,
+  `targets`. WAL mode, single writer goroutine, batched inserts.
+- Staleness/`last_seen` accounting, expected-prober list, ingest-lag metrics.
+- `GET /api/v1/status`, `/api/v1/history` for the UI; Basic auth on all of it.
+- Optional `GET /metrics` so the viewer itself can be scraped.
+- UI: static assets embedded, uPlot vendored, no CDN.
 
-### 5.3 Contracts
+### 5.4 Storage sizing (viewer)
+At 100 targets × 30s intervals: 288k results/day. Raw rows ~100–150 B → ~30–40 MB/day,
+so **7 days ≈ 250 MB**. Rollups are negligible (~1000× fewer rows). All retention is
+configurable; a 30s→60s interval halves it.
 
-`GET /metrics` (Prometheus text) — one series per target:
+### 5.5 Contracts
 
-```
-probe_success{target,group,type}                    0|1
-probe_duration_seconds{target,group,type,phase}      dns|connect|tls|ttfb|total
-probe_http_status_code{target,group,type}
-probe_tls_expiry_seconds{target,group,type}          absolute unix ts
-probe_last_success_timestamp_seconds{target,group,type}
-probe_error_total{target,group,type,class,phase}
-probe_uptime_ratio{target,group,window}              1h|24h|7d
-pulse_probes_total / pulse_prober_build_info
-```
-
-`GET /api/v1/status` (JSON, consumed by the viewer):
+**Push payload** — `POST /api/v1/ingest`, `Authorization: Bearer <PULSE_INGEST_TOKEN>`,
+response `204`:
 
 ```json
 {
-  "prober": {"name": "prober-lan-a", "version": "0.1.0", "uptime_s": 86400},
-  "generated_at": "2026-11-16T02:15:00Z",
-  "targets": [{
-    "name": "api", "group": "web", "type": "http",
-    "state": "UP", "since": "2026-11-15T21:03:11Z",
-    "last": {"at": "...", "ok": true, "duration_ms": 412, "status_code": 200,
-             "error_class": "OK", "tls_expiry": "2027-02-04T00:00:00Z"},
-    "uptime": {"1h": 1.0, "24h": 0.9986, "7d": 0.9991},
-    "latency_ms": {"p50": 380, "p95": 910},
-    "sparkline": [0,0,1,1,1,0,1]
+  "prober": {"name": "prober-lan-a", "version": "0.1.0", "labels": {"region": "lan-a"}},
+  "config_hash": "sha256:9f2c…",
+  "targets": [{"name": "api", "group": "web", "type": "http"}],
+  "results": [{
+    "target": "api",
+    "at": "2026-11-16T02:15:00Z",
+    "ok": true,
+    "duration_ms": 412,
+    "phase_ms": {"dns": 3, "connect": 12, "tls": 40, "ttfb": 350},
+    "status_code": 200,
+    "error_class": "OK",
+    "tls_expiry": "2027-02-04T00:00:00Z"
   }]
 }
 ```
 
-`GET /api/v1/history?target=&window=` — arrays for charts. `GET /healthz`, `/readyz`.
+**Viewer status API** — `GET /api/v1/status` (Basic auth):
+
+```json
+{
+  "generated_at": "2026-11-16T02:15:10Z",
+  "probers": [{"name": "prober-lan-a", "last_seen": "...", "lag_ms": 180,
+               "state": "HEALTHY", "targets": 12}],
+  "targets": [{
+    "name": "api", "group": "web", "prober": "prober-lan-a",
+    "state": "UP", "since": "2026-11-15T21:03:11Z",
+    "last": {"at": "...", "ok": true, "duration_ms": 412, "error_class": "OK",
+             "tls_expiry": "2027-02-04T00:00:00Z"},
+    "uptime": {"1h": 1.0, "24h": 0.9986, "7d": 0.9991},
+    "latency_ms": {"p50": 380, "p95": 910},
+    "sparkline": [0, 0, 1, 1, 1, 0, 1]
+  }]
+}
+```
+
+**Prober metrics** — `GET /metrics` (Prometheus text), per target:
+
+```
+probe_success{target,group,type}                     0|1
+probe_duration_seconds{target,group,type,phase}      dns|connect|tls|ttfb|total
+probe_http_status_code{target,group,type}
+probe_tls_expiry_seconds{target,group,type}
+probe_last_success_timestamp_seconds{target,group,type}
+probe_error_total{target,group,type,class,phase}
+probe_uptime_ratio{target,group,window}              1h|7d
+pulse_push_queued / pulse_push_dropped_total / pulse_push_last_success_timestamp_seconds
+pulse_build_info
+```
 
 ## 6. Docker & operations
 
-- Multi-stage: `golang:1.24-alpine` build → `gcr.io/distroless/static-debian12:non-root`
-  (brings a CA bundle and a non-root `/etc/passwd` — needed for HTTPS probes).
-- Expected: ~15–20 MB per image, non-root, read-only rootfs, `no-new-privileges`,
-  `HEALTHCHECK` hitting `/healthz`.
-- `compose.yaml` for standalone use, `config.example.yaml` mounted read-only.
-- Helm chart in a later phase, matching the house Helm chart conventions
-  conventions. Placement rule: **prober → same cluster/network as its targets;
-  viewer → one instance, exposed through Traefik with OIDC in front.**
+- Multi-stage `golang:1.24-alpine` → `gcr.io/distroless/static-debian12:non-root`
+  (CA bundle + non-root `/etc/passwd` needed for HTTPS probes).
+- Non-root, read-only rootfs, `no-new-privileges`, `HEALTHCHECK` on `/healthz`.
+- Prober: config mounted `:ro`, **no exposed ports required** (metrics port optional).
+- Viewer: SQLite on a named volume (`/var/lib/pulse`), Basic auth from env, behind TLS
+  (Traefik) — Basic auth without TLS is documented as unsupported.
+- Helm chart later; NetworkPolicy shape: prober **egress** to viewer + targets, viewer
+  **ingress** from probers and from the UI users.
 
 ## 7. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Reinventing Gatus with fewer features | v1 scope fixed at 5 milestones; standard `/metrics` contract keeps swap possible; measure against Gatus early |
-| ICMP needs elevated caps (`NET_RAW`) | opt-in flag; default probes are unprivileged |
-| In-memory history lost on restart | documented; optional SQLite (phase 4) or Prometheus for durable history |
-| Probe results mistaken for user-facing truth | viewer shows *from where* (prober name/region) and error class; never a bare green dot |
-| Alert fatigue | confirm_up/confirm_down damping + maintenance windows before notifiers ship |
-| Sandbox/network here blocks `brew`/`docker pull` | implementation commands may need to run unsandboxed or on the target host |
+| Rebuilding Gatus with fewer features | Fixed v1 scope (5 milestones), standard `/metrics` contract, early comparison against Gatus |
+| Silent data loss when the viewer is down | Bounded queue + drop counter + `pulse_push_dropped_total` alertable later |
+| "Green dot" mistaken for user-facing truth | UI always shows *which prober* and the error class; `STALE` is a distinct state |
+| SQLite growth | Retention defaults + rollups + documented size math; WAL, single writer |
+| Viewer single point of failure for display | It is read-only history; probers keep probing and buffering, no data beyond the queue is lost |
+| ICMP needs `NET_RAW` | Opt-in; default probes unprivileged |
+| Basic auth over plain HTTP | Documented as requiring TLS termination in front; OIDC in phase 4 |
 
-## 8. Open questions
+## 8. v1 scope (agreed)
 
-1. **Alerting in v1?** Webhook/Slack/Telegram on day one, or UI-only first?
-2. **Durable history?** In-memory only (restart loses it) vs SQLite vs Prometheus-only?
-3. **Viewer auth?** None (internal only) / basic auth / OIDC via your IdP?
-4. **Scale target?** ~10 targets, ~100, ~1000? (sets the memory/ring-buffer defaults)
-5. **Prober placement?** One per cluster (3), or one central with LAN/VPN reach?
-6. **ICMP needed at all?** It costs a capability; TCP connect often covers "reachable".
-7. **Repo home?** GitLab `nathapp/…` like the other services, GitHub `skywills/…`, or
-   local-only for now?
+In: prober (http/tcp, assertions, classification, damping), push client, viewer ingest,
+SQLite history + rollups, staleness detection, viewer UI, Basic auth, Docker/compose.
+
+Out (post-v1 backlog): alerting/notifiers, OIDC, per-prober tokens, ICMP default, DNS/
+gRPC probes, PromQL backend, multi-tenant, SLA reports/exports.
+
+## 11. Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| D1 | v1 UI-only, no alerting | Keep v1 small; notifier interface stubbed so phase 3 does not need a redesign |
+| D2 | Push only; viewer never contacts a prober | NAT'd LAN clusters need no inbound rules; only one component exposed |
+| D3 | **History in the viewer** (SQLite) | Probers become disposable and stateless-ish; one history for N probers; a prober restart loses nothing; no per-prober volume to back up |
+| D4 | Basic auth from env | Simplest thing that is not "no auth"; OIDC later |
+| D5 | Placement decided per deployment | Prober name/labels travel in the payload, so nothing assumes a topology |
+
+D3 in more detail: the prober could keep history, but then the viewer would have to
+**pull** it (contradicting D2), or each prober would keep its own history and the viewer
+would only see the latest push — losing uptime/latency windows. Storing in the viewer is
+the only option consistent with push. The prober therefore keeps just enough local state
+for its own `/metrics` (~20 KB/target), and that is explicitly *not* the source of truth.
+
+## 12. Open questions
+
+1. **`/metrics` on the prober — keep or drop?** Assumed kept, on a separate port, for a
+   future Prometheus; the viewer never uses it. Say the word and it becomes opt-in.
+2. **Scale** — roughly 10, 100 or 1000 targets? Sets ring-buffer/queue/retention defaults
+   and whether SQLite needs the batching writer in M2 or later.
+3. **Retention** — happy with raw 7d / 1m 30d / 1h 365d?
+4. **Ingest token** — one shared token for v1 (assumed), or per-prober from the start?
+5. **Repo home** — Resolved: public GitHub repository `nathapp-io/pulse`.

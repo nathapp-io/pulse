@@ -1,14 +1,21 @@
-# pulse prober configuration (example)
-# Read-only mount recommended: -v $PWD/config.yaml:/etc/pulse/config.yaml:ro
-# Reload with `kill -HUP <pid>` (keeps last-good config on validation error).
+# pulse-prober configuration (example)
+# Mount read-only: -v $PWD/config.yaml:/etc/pulse/config.yaml:ro
+# Reload with `kill -HUP <pid>` — on a validation error the last-good config stays live.
 
 prober:
-  name: prober-cloud            # shown in the viewer; unique per prober
-  listen: ":8080"
-  # labels:                      # optional, attach to every metric
-  #   region: oci-apse
+  name: prober-cloud            # unique; the viewer attributes every result to it
+  labels:                        # optional, travel with every push
+    region: oci-apse
+  metrics_listen: ":8081"        # /metrics + /healthz (Prometheus later; viewer never uses it)
   max_concurrent_probes: 32
-  history_size: 1440             # results kept per target (~12h at 30s)
+
+viewer:
+  url: https://pulse.example.com # push target; POST /api/v1/ingest
+  push_interval: 10s             # batch cadence (state changes are sent immediately)
+  push_timeout: 5s
+  queue_size: 10000              # bounded FIFO while the viewer is unreachable
+  token_env: PULSE_INGEST_TOKEN  # token is read from this env var, never from the file
+  # tls_insecure_skip_verify: false
 
 defaults:                        # per-target keys override these
   interval: 30s
@@ -32,7 +39,7 @@ probes:
         equals: "ok"
       tls_expiry_min: 336h       # warn if the cert expires within 14 days
     # headers:
-    #   Authorization: "Bearer ${PROBE_TOKEN}"   # env substituted, never logged
+    #   Authorization: "Bearer ${PROBE_TOKEN}"   # env-substituted, never logged
 
   # ---------------------------------------------------------------- plain HTTP
   - name: dashboard
@@ -51,7 +58,7 @@ probes:
     interval: 60s
     timeout: 3s
 
-  # ---------------------------------------------------------------- TCP from hostname
+  # ---------------------------------------------------------------- TCP via hostname
   - name: redis-shared
     group: data
     type: tcp

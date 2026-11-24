@@ -1,7 +1,7 @@
 # pulse — implementation plan
 
-Companion to [`brainstorm.md`](brainstorm.md). Each milestone is independently
-shippable and ends with a runnable container.
+Companion to [`brainstorm.md`](brainstorm.md). Push model (D2), history in the viewer
+(D3), UI-only v1 (D1), Basic auth from env (D4).
 
 ## Repo layout
 
@@ -12,85 +12,110 @@ pulse/
 │   └── viewer/main.go          # viewer binary
 ├── internal/
 │   ├── config/                 # YAML schema, validation, hot reload
-│   ├── probe/                  # http.go tcp.go icmp.go + error classification
-│   ├── assert/                 # status/regex/json-path/tls-expiry matchers
+│   ├── probe/                  # http.go tcp.go icmp.go
+│   ├── assert/                 # status / regex / json-path / header / tls-expiry
+│   ├── classify/               # error classes from transport + assertion failures
 │   ├── schedule/               # per-target workers, jitter, semaphore
-│   ├── store/                  # ring buffer + 1m/5m/1h aggregates
-│   ├── state/                  # UP/DOWN machine, confirm_up/down, maintenance
-│   ├── exporter/               # prometheus collectors + handlers
-│   ├── api/                    # JSON handlers (/api/v1/status, /history)
-│   ├── notify/                 # webhook, slack, telegram (phase 3)
-│   └── viewer/                 # prober clients, aggregate cache, auth
-├── web/                        # embedded static UI (go:embed), uPlot vendored
+│   ├── state/                  # UNKNOWN/UP/DOWN, confirm_up/down, maintenance
+│   ├── push/                   # batch builder, bounded queue, backoff, client
+│   ├── ingest/                 # viewer: token auth, decode, dedupe, fan-in
+│   ├── db/                     # viewer: SQLite schema, migrations, retention, rollups
+│   ├── staleness/              # viewer: last_seen, expected probers, STALE state
+│   ├── api/                    # viewer: /api/v1/status, /api/v1/history, auth
+│   ├── metrics/                # prometheus collectors for both binaries
+│   └── web/                    # go:embed static UI + uPlot (vendored)
+├── web/                        # index.html, app.js, style.css, vendor/uplot
 ├── deploy/
 │   ├── compose.yaml
 │   └── helm/                   # phase 5
-├── config.example.yaml
+├── config.example.yaml         # prober config
+├── viewer.env.example          # viewer env (auth, retention, expected probers)
 ├── docs/
-└── Makefile                    # build, test, lint, docker
+└── Makefile                    # build, test, lint, docker, cross-arch
 ```
 
-## M1 — Prober core (the useful part)
+## M0 — Skeleton
 
-Config loading + validation, HTTP(S) and TCP probes, per-target scheduling with jitter,
-error classification, ring buffer, `/metrics`, `/api/v1/status`, `/healthz`, distroless
-image, `compose.yaml`.
+`go.mod`, both `main.go` stubs, the shared result/ingest types, config schema + strict
+validation with table-driven tests, `Makefile`, `compose.yaml` skeleton (empty images).
 
-**Acceptance:** given a config with 3 targets (1 healthy HTTPS, 1 closed TCP port, 1 HTTP
-500), `docker run` exposes `/metrics` with `probe_success` 1/0/0 and correct
-`probe_error_total{phase}` classes; image < 30 MB; 100 targets at 30s intervals stay
-under 60 MB RSS; `kill -HUP` applies a config change without dropping the process.
+**Acceptance:** `go build ./...` and `go test ./internal/config` pass; `pulse-prober
+--config config.example.yaml --check` validates the example and exits 0; unknown YAML
+keys are a hard error (typos in probe config must never silently do nothing).
 
-## M2 — Viewer UI
+## M1 — Prober core
 
-Fan-in of N probers, status grid grouped by `group`, uptime 1h/24h/7d, latency p50/p95,
-sparkline, TLS days-left, incident timeline, dark/light. Static assets embedded, no npm
-in the build.
+HTTP(S) + TCP probes, error classification, per-target scheduling with jitter and a
+global semaphore, state machine with `confirm_up`/`confirm_down`, uptime buckets,
+`/metrics` + `/healthz` on `:8081`.
 
-**Acceptance:** with two prober containers in compose, the viewer lists both, a killed
-target turns DOWN within `confirm_down × interval` and recovers automatically; page
-weight < 100 KB gzipped; works with JS enabled only (no build step, no CDN).
+**Acceptance:** with 3 targets (healthy HTTPS, closed TCP port, HTTP 500) `/metrics`
+reports `probe_success` 1/0/0 with the right `probe_error_total{phase}` classes
+(`CONNECT_REFUSED`, `HTTP_STATUS`); a target that fails once stays UP; image < 30 MB; 100
+targets at 30s stay under 60 MB RSS; `kill -HUP` applies config changes without dropping
+the process.
 
-## M3 — Assertions, notifications, damping
+## M2 — Push + ingest + history (the vertical slice)
 
-Body regex + JSON path + header assertions, `tls_expiry_min` warnings, `confirm_up`/
-`confirm_down`, maintenance windows, notifier interface + webhook/Slack/Telegram.
+Prober push client (batching, immediate send on state transition, bounded queue,
+exponential backoff + jitter, drop counter). Viewer ingest endpoint (bearer token,
+idempotency on `(prober,target,at)`), SQLite schema + migrations + batched writer, rollup
+jobs, staleness accounting, Basic auth, `compose.yaml` with both services.
 
-**Acceptance:** a target that returns 200 with a wrong body is ASSERT_FAIL; a 20s blip
-inside a maintenance window produces zero notifications; a real outage produces exactly
-one DOWN notification with error class and prober name.
+**Acceptance:**
+- Stop the viewer, let the prober run 2 minutes, start the viewer: **no gap** in history,
+  `pulse_push_dropped_total` = 0.
+- `POST /api/v1/ingest` without/with a wrong token → 401; with the right token → 204.
+- Replaying the same batch twice inserts no duplicate rows (`SELECT count(*)`).
+- Kill the prober: its targets go **STALE** (not DOWN) after 3 × push interval; restore it
+  and they return within one push interval.
+- UI/API without credentials → 401 `WWW-Authenticate`; with the env credentials → 200.
 
-## M4 — Auth & scale
+## M3 — Viewer UI
 
-Viewer auth (basic, then OIDC against your IdP), multi-prober labels/regions, optional
-SQLite persistence, optional PromQL backend (`PROMETHEUS_URL`).
+Grid grouped by `group`, status pill (UP/DOWN/STALE/UNKNOWN), uptime 1h/24h/7d from
+rollups, latency p50/p95, sparkline, TLS days-left, incident timeline, per-prober lag and
+last-seen. Dark/light, responsive, no CDN, no build step.
 
-**Acceptance:** unauthenticated request redirected to OIDC; history survives a viewer
-restart when SQLite is enabled; 1000 targets under 200 MB RSS.
+**Acceptance:** page weight < 100 KB gzipped; all three probers visible in compose with
+correct attribution; a target killed in the UI shows DOWN with error class and "since";
+a stopped prober shows STALE grey with "last seen 42s ago"; charts render 7d of rollups
+without loading raw rows.
+
+## M4 — Assertions, retention, auth hardening
+
+Body regex / JSON path / header assertions wired end-to-end, `tls_expiry_min` warnings,
+maintenance windows, retention jobs + documented sizing, per-prober ingest tokens,
+optional OIDC (any OIDC IdP), optional PromQL backend (`PROMETHEUS_URL`).
+
+**Acceptance:** a 200 with a wrong body is `ASSERT_FAIL` in the UI; a target in a
+maintenance window still records results but is not counted as DOWN; retention prunes raw
+rows and keeps rollups; a revoked prober token is rejected within one push interval.
 
 ## M5 — Deploy & CI
 
 Helm chart matching the house Helm chart conventions, GitLab CI (lint, `go test
--race`, buildx multi-arch `linux/amd64,linux/arm64` push), NetworkPolicy snippet,
-runbook with placement guidance (prober per cluster, viewer behind Traefik).
+-race`, buildx `linux/amd64,linux/arm64`), NetworkPolicy (prober egress → viewer ingress
+only), runbook.
 
-**Acceptance:** chart installs on a k3s cluster with an Ingress, arm64 image runs, probes
-reach private `ClusterIP` services from inside the cluster.
+**Acceptance:** chart installs on a k3s cluster; arm64 images run on cloud nodes; a prober
+inside the cluster reaches private `ClusterIP` targets while exposing no inbound port;
+viewer Ingress behind Traefik with TLS.
 
 ## Testing strategy
 
-- `httptest` servers for HTTP probe/assertion matrix (status, redirect, TLS, timeout,
-  slow body, gzip, wrong JSON).
-- Real `net.Listen` on `127.0.0.1:0` for TCP; closed-port test for CONNECT_REFUSED.
-- Table-driven config validation (missing interval, bad regex, duplicate names).
-- `go test -race ./...`; a compose smoke test for M1/M2.
-- No mocks for the network layer — the probes *are* the network layer.
+- `httptest` for the HTTP probe/assertion matrix (status, redirect, TLS, timeout, slow
+  body, gzip, bad JSON).
+- Real `net.Listen` on `127.0.0.1:0` for TCP; a closed port for `CONNECT_REFUSED`.
+- Table-driven config validation (missing interval, bad regex, duplicate names, unknown
+  keys).
+- Push tests against an `httptest` viewer: retry/backoff, queue overflow ordering,
+  idempotent replay.
+- DB tests on a temp SQLite file: migration idempotency, dedupe, rollup math, retention.
+- `go test -race ./...`; one compose smoke test covering M2's acceptance list.
 
-## Decisions needed before M1
+## Still needed before M1
 
-From the brainstorm's open questions, these four block code:
-
-1. Alerting in v1 or UI-only? (M3 assumption: UI-only, notifier interface stubbed)
-2. In-memory history vs SQLite? (M1 assumption: in-memory only)
-3. Viewer auth now or later? (assumption: later, internal-only)
-4. Prober placement — one per cluster? (assumption: one per cluster, N probers)
+1. Scale expectation (~10 / ~100 / ~1000 targets) — sets defaults.
+2. Keep the prober's `/metrics` (assumed yes, separate port)?
+3. Repo home / remote.

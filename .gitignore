@@ -10,9 +10,14 @@ coverage.*
 # local config / secrets — never commit
 config.yaml
 config.local.yaml
+*.env
 .env
 .env.*
 !.env.example
+viewer.env
+pulse.db
+pulse.db-*
+*.db
 
 # editors / OS
 .DS_Store
