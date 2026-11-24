@@ -1,0 +1,50 @@
+# Minimal deployment: only the viewer publishes a port; probers dial out, so a
+# prober inside a NAT'd network needs no inbound rule.
+#
+#   cp .env.example .env    # then edit the secrets
+#   docker compose up -d --build
+#   open http://localhost:8080/   (HTTP Basic auth with PULSE_AUTH_USER/PASSWORD)
+name: pulse
+
+services:
+  viewer:
+    build:
+      context: .
+      args:
+        ROLE: viewer
+    image: pulse-viewer:dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Swap to PULSE_STORE=memory to run with no volume at all (history is then
+      # lost on restart -- useful for a demo, not for a deployment).
+      PULSE_STORE: sqlite
+      PULSE_DB: /var/lib/pulse/pulse.db
+      PULSE_AUTH_USER: ${PULSE_AUTH_USER:-admin}
+      PULSE_AUTH_PASSWORD: ${PULSE_AUTH_PASSWORD:?set PULSE_AUTH_PASSWORD in .env}
+      PULSE_INGEST_TOKEN: ${PULSE_INGEST_TOKEN:?set PULSE_INGEST_TOKEN in .env}
+      PULSE_EXPECTED_PROBERS: prober
+      PULSE_STALE_AFTER: 60s
+    volumes:
+      - pulse-data:/var/lib/pulse
+    # No compose healthcheck: the image is distroless, so there is no shell or
+    # curl in it. Point an orchestrator probe at GET /healthz instead.
+
+  prober:
+    build:
+      context: .
+      args:
+        ROLE: prober
+    image: pulse-prober:dev
+    restart: unless-stopped
+    depends_on:
+      - viewer
+    command: ["--config", "/etc/pulse/config.yaml"]
+    environment:
+      PULSE_INGEST_TOKEN: ${PULSE_INGEST_TOKEN:?set PULSE_INGEST_TOKEN in .env}
+    volumes:
+      - ./deploy/prober.compose.yaml:/etc/pulse/config.yaml:ro
+
+volumes:
+  pulse-data:

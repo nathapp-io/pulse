@@ -1,0 +1,16 @@
+.git
+.nax
+.github
+bin/
+dist/
+*.db
+*.db-*
+*.test
+*.out
+config.yaml
+config.local.yaml
+*.env
+.env
+viewer.env
+.DS_Store
+docs/

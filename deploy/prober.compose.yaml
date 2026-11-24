@@ -1,0 +1,32 @@
+# Prober configuration for `docker compose up` -- useful to see the stack work,
+# not a real target list. Replace the demo targets with your own.
+prober:
+  name: prober
+  metrics_listen: ":8081"
+  max_concurrent_probes: 16
+
+viewer:
+  url: http://viewer:8080/api/v1/ingest   # service name on the compose network
+  push_interval: 10s
+  push_timeout: 5s
+  queue_size: 10000
+  token_env: PULSE_INGEST_TOKEN
+
+defaults:
+  interval: 30s
+  timeout: 5s
+  confirm_down: 2
+  confirm_up: 1
+
+probes:
+  - name: example-web
+    group: demo
+    type: http
+    url: https://example.com/
+    expect:
+      status: [200]
+
+  - name: example-tcp
+    group: demo
+    type: tcp
+    address: example.com:443
