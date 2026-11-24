@@ -454,3 +454,61 @@ func TestMaintenanceFlagVisibleInHistory(t *testing.T) {
 		}
 	})
 }
+
+// A failed probe has no latency: a refused connection records 0 ms, so counting
+// failures would report a dead target as fast and drag a flaky one towards zero.
+func TestLatencyCountsOnlySuccessfulProbes(t *testing.T) {
+	forEachBackend(t, nil, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		base := time.Now().UTC().Truncate(time.Second)
+
+		var results []model.Result
+		for i, d := range []int64{10, 20, 40, 100} {
+			results = append(results, result("api", base.Add(time.Duration(i)*time.Second), true, "UP", d))
+		}
+		// Three failures, each recorded as 0 ms by the prober.
+		for i := 0; i < 3; i++ {
+			results = append(results, result("api", base.Add(time.Duration(10+i)*time.Second), false, "DOWN", 0))
+		}
+		if _, err := st.Ingest(ctx, batchOf("prober-a", nil, results...), base.Add(20*time.Second)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		snap, err := st.Snapshot(ctx)
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		latency := findTarget(t, snap, "api").Latency
+		if latency["p50"] != 20 {
+			t.Fatalf("p50 = %d, want 20: failures leaked into the latency samples (%+v)", latency["p50"], latency)
+		}
+		if latency["p95"] != 100 {
+			t.Fatalf("p95 = %d, want 100 (%+v)", latency["p95"], latency)
+		}
+	})
+}
+
+// A target that has never succeeded must report no latency at all, rather than a
+// flattering 0 ms.
+func TestNoSuccessfulProbeMeansNoLatency(t *testing.T) {
+	forEachBackend(t, nil, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		base := time.Now().UTC().Truncate(time.Second)
+
+		var results []model.Result
+		for i := 0; i < 3; i++ {
+			results = append(results, result("dead", base.Add(time.Duration(i)*time.Second), false, "DOWN", 0))
+		}
+		if _, err := st.Ingest(ctx, batchOf("prober-a", nil, results...), base.Add(5*time.Second)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		snap, err := st.Snapshot(ctx)
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		if latency := findTarget(t, snap, "dead").Latency; len(latency) != 0 {
+			t.Fatalf("latency = %+v, want no samples for a target that never succeeded", latency)
+		}
+	})
+}

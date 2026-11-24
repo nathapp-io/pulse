@@ -194,8 +194,12 @@ func (m *memoryStore) History(_ context.Context, target string, from time.Time) 
 
 func (m *memoryStore) Close() error { return nil }
 
-// recentDurations returns durations inside the latency window, relative to the
-// newest sample (not wall-clock) so a paused instance still reports something.
+// recentDurations returns durations of successful probes inside the latency
+// window, relative to the newest sample (not wall-clock) so a paused instance
+// still reports something.
+//
+// Failures are excluded: a refused connection records 0 ms, so counting it would
+// report a dead target as fast and drag a flaky target's percentiles towards zero.
 func recentDurations(points []model.Result) []int64 {
 	if len(points) == 0 {
 		return nil
@@ -205,7 +209,7 @@ func recentDurations(points []model.Result) []int64 {
 
 	out := make([]int64, 0, len(points))
 	for _, p := range points {
-		if !p.At.Before(cutoff) {
+		if p.OK && !p.At.Before(cutoff) {
 			out = append(out, p.DurationMS)
 		}
 	}

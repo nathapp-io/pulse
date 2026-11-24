@@ -417,7 +417,9 @@ func (s *sqliteStore) fillUptime(
 func (s *sqliteStore) fillLatency(ctx context.Context, targets []TargetState, targetOf map[string]int) error {
 	cutoff := time.Now().Add(-LatencyWindow).UnixNano()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT target, duration_ms FROM results WHERE at >= ? ORDER BY target, at`, cutoff)
+		// ok = 1 only: a failed probe's duration says nothing about latency, and a
+		// refused connection records 0 ms, which would read as "very fast".
+		`SELECT target, duration_ms FROM results WHERE at >= ? AND ok = 1 ORDER BY target, at`, cutoff)
 	if err != nil {
 		return fmt.Errorf("query latency: %w", err)
 	}
