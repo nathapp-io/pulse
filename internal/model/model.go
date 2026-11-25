@@ -51,6 +51,9 @@ type Result struct {
 type Batch struct {
 	Prober     ProberInfo `json:"prober"`
 	ConfigHash string     `json:"config_hash,omitempty"`
+	// InventoryRevision orders target declarations from this prober independently
+	// of result timestamps. Zero identifies a sender using the legacy protocol.
+	InventoryRevision int64 `json:"inventory_revision,omitempty"`
 	// Targets is authoritative when non-nil, including an explicit empty list.
 	// Keep [] distinct from null (or an omitted field) on the wire.
 	Targets []TargetSpec `json:"targets"`
@@ -65,6 +68,9 @@ func (b Batch) Validate() error {
 	var errs []error
 	if strings.TrimSpace(b.Prober.Name) == "" {
 		errs = append(errs, errors.New("prober.name is required"))
+	}
+	if b.InventoryRevision < 0 || (b.InventoryRevision != 0 && b.Targets == nil) {
+		errs = append(errs, errors.New("inventory_revision must be positive and accompany a targets list when used"))
 	}
 	if len(b.Results) == 0 {
 		errs = append(errs, errors.New("results must not be empty"))

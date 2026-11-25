@@ -21,17 +21,17 @@ type memoryStore struct {
 }
 
 type memProber struct {
+	order    inventoryOrder
 	info     model.ProberInfo
 	lastSeen time.Time
 	declared bool // once a list is supplied, results alone cannot activate targets
 }
 
 type memTarget struct {
-	active  bool
-	spec    model.TargetSpec
-	prober  string
-	state   string
-	since   time.Time
+	active bool
+	spec   model.TargetSpec
+	prober string
+	stateRun
 	last    model.Result
 	points  []model.Result
 	buckets *uptime.Buckets
@@ -62,19 +62,20 @@ func (m *memoryStore) Ingest(_ context.Context, b model.Batch, receivedAt time.T
 	p.info = b.Prober
 	p.lastSeen = receivedAt
 	if b.Targets != nil {
-		p.declared = true
-		for k, t := range m.targets {
-			if k.prober == b.Prober.Name {
-				t.active = false
+		order := declarationOrder(b)
+		if !p.declared || order.newerThan(p.order) {
+			p.declared, p.order = true, order
+			for k, t := range m.targets {
+				if k.prober == b.Prober.Name {
+					t.active = false
+				}
+			}
+			// Declared targets exist even before their first result.
+			for _, spec := range b.Targets {
+				t := m.targetOrCreate(spec.Name, b.Prober.Name)
+				t.spec, t.active = spec, true
 			}
 		}
-	}
-
-	// Declared targets exist even before their first result.
-	for _, spec := range b.Targets {
-		t := m.targetOrCreate(spec.Name, b.Prober.Name)
-		t.spec = spec
-		t.active = true
 	}
 
 	stored := 0
@@ -97,14 +98,14 @@ func (m *memoryStore) Ingest(_ context.Context, b model.Batch, receivedAt time.T
 		t.points[i] = r
 		t.buckets.Record(r.OK, r.At)
 
-		// "Latest" means latest by probe time, not by arrival order.
-		if t.last.At.IsZero() || !r.At.Before(t.last.At) {
-			if state := model.NormalizeState(r.State); t.last.At.IsZero() || state != t.state {
-				t.state = state
-				t.since = r.At
-			}
+		if t.latest.IsZero() || r.At.After(t.latest) {
 			t.last = r
 		}
+		var next time.Time
+		if i+1 < len(t.points) {
+			next = t.points[i+1].At
+		}
+		t.record(model.NormalizeState(r.State), r.At, next)
 		stored++
 	}
 
@@ -119,11 +120,11 @@ func (m *memoryStore) targetOrCreate(name, prober string) *memTarget {
 	t := m.targets[key]
 	if t == nil {
 		t = &memTarget{
-			spec:    model.TargetSpec{Name: name},
-			prober:  prober,
-			state:   "UNKNOWN",
-			buckets: uptime.New(),
-			seen:    make(map[int64]struct{}),
+			spec:     model.TargetSpec{Name: name},
+			prober:   prober,
+			stateRun: stateRun{state: "UNKNOWN"},
+			buckets:  uptime.New(),
+			seen:     make(map[int64]struct{}),
 		}
 		m.targets[key] = t
 	}

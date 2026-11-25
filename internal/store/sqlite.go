@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS probers (
   labels      TEXT NOT NULL DEFAULT '{}',
   last_seen   INTEGER NOT NULL,
   config_hash TEXT NOT NULL DEFAULT '',
-  declared    INTEGER NOT NULL DEFAULT 0
+  declared    INTEGER NOT NULL DEFAULT 0,
+  inventory_versioned INTEGER NOT NULL DEFAULT 0,
+  inventory_order INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS targets (
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS targets (
   since  INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
   latest_at INTEGER,                     -- newest accepted probe time, independent of retention
+  before_run INTEGER,                    -- last differing state before the current run
   PRIMARY KEY (prober, name)
 );
 
@@ -117,6 +120,9 @@ func migrateSQLite(db *sql.DB) error {
 		{"probers", "declared", "INTEGER NOT NULL DEFAULT 0"},
 		{"targets", "active", "INTEGER NOT NULL DEFAULT 1"},
 		{"targets", "latest_at", "INTEGER"},
+		{"targets", "before_run", "INTEGER"},
+		{"probers", "inventory_versioned", "INTEGER NOT NULL DEFAULT 0"},
+		{"probers", "inventory_order", "INTEGER"},
 	} {
 		var exists bool
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name=?)`, c.table, c.name).Scan(&exists); err != nil {
@@ -128,9 +134,21 @@ func migrateSQLite(db *sql.DB) error {
 		if _, err := tx.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.name + ` ` + c.definition); err != nil {
 			return err
 		}
-		if c.name == "latest_at" {
-			if _, err := tx.Exec(backfillLatest); err != nil {
-				return fmt.Errorf("backfill latest state: %w", err)
+		var backfill string
+		switch c.name {
+		case "latest_at":
+			backfill = backfillLatest
+		case "before_run":
+			backfill = backfillRun
+		case "inventory_order":
+			// Old rows didn't distinguish results with/without a declaration.
+			// Use the high-water mark across ALL targets (even inactive/pruned)
+			// as the best available replay fence for previously declared lists.
+			backfill = `UPDATE probers SET inventory_order=(SELECT MAX(latest_at) FROM targets WHERE prober=probers.name) WHERE declared=1`
+		}
+		if backfill != "" {
+			if _, err := tx.Exec(backfill); err != nil {
+				return fmt.Errorf("backfill %s: %w", c.name, err)
 			}
 		}
 	}
@@ -152,6 +170,15 @@ UPDATE targets AS t SET state=r.state, since=COALESCE(
   (SELECT MIN(at) FROM results WHERE prober=t.prober AND target=t.name))
 FROM results AS r WHERE r.prober=t.prober AND r.target=t.name AND r.at=t.latest_at AND r.state<>t.state;`
 
+// The branch schema already has latest_at, but its since could miss late
+// observations. Reconcile the old summary with surviving evidence only once.
+const backfillRun = `
+UPDATE targets AS t SET before_run=(SELECT MAX(at) FROM results WHERE prober=t.prober AND target=t.name AND at<t.latest_at AND state<>t.state);
+UPDATE targets AS t SET since=MIN(
+  CASE WHEN before_run IS NULL OR since>before_run THEN since ELSE latest_at END,
+  COALESCE((SELECT MIN(at) FROM results WHERE prober=t.prober AND target=t.name AND state=t.state AND (t.before_run IS NULL OR at>t.before_run)),latest_at))
+WHERE latest_at IS NOT NULL;`
+
 func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time.Time) (int, error) {
 	if err := b.Validate(); err != nil {
 		return 0, err
@@ -171,28 +198,18 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 		return 0, fmt.Errorf("encode labels: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO probers(name, version, labels, last_seen, config_hash, declared) VALUES(?,?,?,?,?,?)
+		INSERT INTO probers(name, version, labels, last_seen, config_hash) VALUES(?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			version=excluded.version, labels=excluded.labels,
-			last_seen=excluded.last_seen, config_hash=excluded.config_hash,
-			declared=MAX(probers.declared,excluded.declared)`,
-		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash, b.Targets != nil,
+			last_seen=excluded.last_seen, config_hash=excluded.config_hash`,
+		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash,
 	); err != nil {
 		return 0, fmt.Errorf("upsert prober: %w", err)
 	}
 
 	if b.Targets != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE targets SET active=0 WHERE prober=?`, b.Prober.Name); err != nil {
-			return 0, fmt.Errorf("reconcile active targets: %w", err)
-		}
-	}
-	for _, spec := range b.Targets {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO targets(prober, name, grp, typ, state, since) VALUES(?,?,?,?,'UNKNOWN',0)
-			ON CONFLICT(prober, name) DO UPDATE SET grp=excluded.grp, typ=excluded.typ, active=1`,
-			b.Prober.Name, spec.Name, spec.Group, spec.Type,
-		); err != nil {
-			return 0, fmt.Errorf("upsert target %q: %w", spec.Name, err)
+		if err := reconcileSQLite(ctx, tx, b); err != nil {
+			return 0, err
 		}
 	}
 
@@ -246,16 +263,7 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 			}
 		}
 
-		// Results never change an existing target's membership. For an unseen
-		// name, infer membership only if this prober has never supplied a list.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO targets(prober, name, state, since, latest_at, active)
-			SELECT name, ?, ?, ?, ?, NOT declared FROM probers WHERE name=?
-			ON CONFLICT(prober, name) DO UPDATE SET
-				since=CASE WHEN targets.latest_at IS NULL OR targets.state<>excluded.state THEN excluded.latest_at ELSE targets.since END,
-				state=excluded.state, latest_at=excluded.latest_at
-			WHERE targets.latest_at IS NULL OR targets.latest_at < excluded.latest_at`,
-			r.Target, model.NormalizeState(r.State), r.At.UnixNano(), r.At.UnixNano(), b.Prober.Name); err != nil {
+		if err := recordSQLite(ctx, tx, b.Prober.Name, r); err != nil {
 			return 0, fmt.Errorf("update state for %q: %w", r.Target, err)
 		}
 	}
@@ -267,6 +275,82 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 		return stored, err
 	}
 	return stored, nil
+}
+
+func reconcileSQLite(ctx context.Context, tx *sql.Tx, b model.Batch) error {
+	order := declarationOrder(b)
+	accepted, err := tx.ExecContext(ctx, `UPDATE probers SET declared=1, inventory_versioned=?, inventory_order=?
+		WHERE name=? AND (inventory_order IS NULL OR (?,?) > (inventory_versioned,inventory_order))`,
+		order.versioned, order.value, b.Prober.Name, order.versioned, order.value)
+	if err != nil {
+		return fmt.Errorf("order inventory: %w", err)
+	}
+	n, err := accepted.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE targets SET active=0 WHERE prober=?`, b.Prober.Name); err != nil {
+		return fmt.Errorf("reconcile active targets: %w", err)
+	}
+	for _, spec := range b.Targets {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO targets(prober, name, grp, typ, state, since) VALUES(?,?,?,?,'UNKNOWN',0)
+			ON CONFLICT(prober, name) DO UPDATE SET grp=excluded.grp, typ=excluded.typ, active=1`,
+			b.Prober.Name, spec.Name, spec.Group, spec.Type,
+		); err != nil {
+			return fmt.Errorf("upsert target %q: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
+// Read just the summary on ordinary writes. A late transition inside the
+// current run needs one additional successor seek on the results primary key.
+func recordSQLite(ctx context.Context, tx *sql.Tx, prober string, r model.Result) error {
+	var run stateRun
+	var latest, boundary sql.NullInt64
+	var since int64
+	err := tx.QueryRowContext(ctx, `SELECT state, since, latest_at, before_run FROM targets WHERE prober=? AND name=?`, prober, r.Target).Scan(&run.state, &since, &latest, &boundary)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if latest.Valid {
+		run.latest, run.since = time.Unix(0, latest.Int64), time.Unix(0, since)
+	}
+	if boundary.Valid {
+		run.beforeRun = time.Unix(0, boundary.Int64)
+	}
+	state := model.NormalizeState(r.State)
+	var next time.Time
+	if state != run.state && r.At.After(run.since) && r.At.Before(run.latest) {
+		var at sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT MIN(at) FROM results WHERE prober=? AND target=? AND at>?`, prober, r.Target, r.At.UnixNano()).Scan(&at); err != nil {
+			return err
+		}
+		if at.Valid {
+			next = time.Unix(0, at.Int64)
+		}
+	}
+	previous := run
+	run.record(state, r.At, next)
+	if run == previous {
+		return nil
+	}
+	var before any
+	if !run.beforeRun.IsZero() {
+		before = run.beforeRun.UnixNano()
+	}
+	// Results never change an existing target's membership. For a new name,
+	// infer membership only if the prober has never supplied a target list.
+	_, err = tx.ExecContext(ctx, `INSERT INTO targets(prober,name,state,since,latest_at,before_run,active)
+		SELECT name,?,?,?,?,?, NOT declared FROM probers WHERE name=?
+		ON CONFLICT(prober,name) DO UPDATE SET state=excluded.state, since=excluded.since,
+			latest_at=excluded.latest_at, before_run=excluded.before_run`,
+		r.Target, run.state, run.since.UnixNano(), run.latest.UnixNano(), before, prober)
+	return err
 }
 
 // pruneLocked drops expired rows at most once a minute.
@@ -331,20 +415,22 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 	_ = rows.Close()
 
 	// Targets.
-	rows, err = s.db.QueryContext(ctx, `SELECT prober, name, grp, typ, state, since FROM targets WHERE active=1`)
+	rows, err = s.db.QueryContext(ctx, `SELECT prober, name, grp, typ, state, CASE WHEN latest_at IS NOT NULL THEN since END FROM targets WHERE active=1`)
 	if err != nil {
 		return snap, fmt.Errorf("query targets: %w", err)
 	}
 	for rows.Next() {
 		var (
 			t     TargetState
-			since int64
+			since sql.NullInt64
 		)
 		if err := rows.Scan(&t.Prober, &t.Spec.Name, &t.Spec.Group, &t.Spec.Type, &t.State, &since); err != nil {
 			_ = rows.Close()
 			return snap, err
 		}
-		t.Since = unixOrZero(since)
+		if since.Valid {
+			t.Since = time.Unix(0, since.Int64).UTC()
+		}
 		t.Uptime = make(map[string]float64, len(UptimeWindows))
 		targetOf[targetKey{t.Prober, t.Spec.Name}] = len(targets)
 		targets = append(targets, t)
@@ -552,11 +638,4 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-func unixOrZero(nanos int64) time.Time {
-	if nanos == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, nanos).UTC()
 }

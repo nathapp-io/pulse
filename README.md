@@ -143,6 +143,13 @@ in status and counts. Retiring a target does not delete its history; it remains
 queryable by the same pair until normal retention expires. A results-only push
 that omits `targets` does not replace the declaration.
 
+New probers send an `inventory_revision` with each target-list snapshot. The viewer
+applies only newer declarations for that prober; it still accepts unseen samples in
+older batches. For unversioned senders it orders declarations by the newest sample
+in the batch until the first versioned declaration arrives. **Upgrade the viewer
+before the probers:** older viewers reject unknown batch fields. Use one sender per
+prober name and keep its clock synchronized across restarts.
+
 ## Viewer storage
 
 Chosen per deployment, one interface, identical API and behaviour:

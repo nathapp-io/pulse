@@ -142,6 +142,7 @@ func TestHistoryAndStatusAreScopedToProber(t *testing.T) {
 			}
 			east, west := sampleBatch(at), sampleBatch(at)
 			east.Prober.Name, west.Prober.Name = "east", "west"
+			east.InventoryRevision, west.InventoryRevision = 1, 1
 			west.Results[0].OK, west.Results[0].State = false, "DOWN"
 			send(east)
 			send(west)
@@ -162,8 +163,11 @@ func TestHistoryAndStatusAreScopedToProber(t *testing.T) {
 				t.Fatalf("ambiguous history returned %d", rec.Code)
 			}
 			// A reload retires only this prober's api; its history remains addressable.
-			east.Targets[0].Name, east.Results[0].Target = "web", "web"
-			send(east)
+			newEast := sampleBatch(at)
+			newEast.Prober.Name, newEast.InventoryRevision = "east", 2
+			newEast.Targets[0].Name, newEast.Results[0].Target = "web", "web"
+			send(newEast)
+			send(east) // exact replay of revision 1 must not bring api back
 			if s := status(); len(s.Targets) != 2 || s.Targets[0].Name != "api" || s.Targets[0].Prober != "west" || s.Targets[1].Name != "web" || s.Targets[1].Prober != "east" {
 				t.Fatalf("status after reload: %+v", s.Targets)
 			}

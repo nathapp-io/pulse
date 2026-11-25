@@ -109,7 +109,7 @@ func TestActiveInventoryReconciliation(t *testing.T) {
 	})
 }
 
-func TestDelayedSampleIsHistoryOnly(t *testing.T) {
+func TestDelayedTransitionSplitsLatestRun(t *testing.T) {
 	forEachBackend(t, nil, func(t *testing.T, st Store) {
 		now := time.Now().UTC()
 		first, last := now.Add(-2*time.Minute), now
@@ -118,8 +118,8 @@ func TestDelayedSampleIsHistoryOnly(t *testing.T) {
 		delayed.Maintenance = true
 		ingestAll(t, st, batchOf("p", nil, delayed), now)
 		target := findTarget(t, snapshotOf(t, st), "api")
-		if target.State != "UP" || !target.Since.Equal(first) || target.Maintenance || !target.Last.At.Equal(last) {
-			t.Fatalf("delayed sample changed current state: %+v", target)
+		if target.State != "UP" || !target.Since.Equal(last) || target.Maintenance || !target.Last.At.Equal(last) {
+			t.Fatalf("incorrect state after delayed transition: %+v", target)
 		}
 		h, err := st.History(context.Background(), "p", "api", first)
 		if err != nil || len(h) != 3 || !h[0].At.Equal(first) || !h[1].Maintenance || !h[2].At.Equal(last) {
