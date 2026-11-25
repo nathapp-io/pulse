@@ -201,8 +201,9 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 		INSERT INTO probers(name, version, labels, last_seen, config_hash) VALUES(?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			version=excluded.version, labels=excluded.labels,
-			last_seen=excluded.last_seen, config_hash=excluded.config_hash`,
-		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash,
+			last_seen=excluded.last_seen,
+			config_hash=CASE WHEN ? THEN excluded.config_hash ELSE probers.config_hash END`,
+		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash, b.Targets == nil,
 	); err != nil {
 		return 0, fmt.Errorf("upsert prober: %w", err)
 	}
@@ -279,9 +280,9 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 
 func reconcileSQLite(ctx context.Context, tx *sql.Tx, b model.Batch) error {
 	order := declarationOrder(b)
-	accepted, err := tx.ExecContext(ctx, `UPDATE probers SET declared=1, inventory_versioned=?, inventory_order=?
+	accepted, err := tx.ExecContext(ctx, `UPDATE probers SET declared=1, config_hash=?, inventory_versioned=?, inventory_order=?
 		WHERE name=? AND (inventory_order IS NULL OR (?,?) > (inventory_versioned,inventory_order))`,
-		order.versioned, order.value, b.Prober.Name, order.versioned, order.value)
+		b.ConfigHash, order.versioned, order.value, b.Prober.Name, order.versioned, order.value)
 	if err != nil {
 		return fmt.Errorf("order inventory: %w", err)
 	}

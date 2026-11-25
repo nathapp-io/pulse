@@ -98,6 +98,41 @@ func TestInventoryProtocolUpgrade(t *testing.T) {
 	})
 }
 
+func TestSQLiteInventoryRollback(t *testing.T) {
+	st, err := Open(Config{Kind: "sqlite", Path: filepath.Join(t.TempDir(), "tx.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	b := batchOf("p", []model.TargetSpec{{Name: "old"}}, result("old", now, true, "UP", 1))
+	b.InventoryRevision = 1
+	ingestAll(t, st, b, now)
+	db := st.(*sqliteStore).db
+	if _, err := db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON results BEGIN SELECT RAISE(ABORT,'injected failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	b.InventoryRevision = 2
+	b.Targets = []model.TargetSpec{}
+	if _, err := st.Ingest(context.Background(), b, now); err == nil {
+		t.Fatal("expected result insert failure")
+	}
+	if got := snapshotOf(t, st).Targets; len(got) != 1 || got[0].Spec.Name != "old" {
+		t.Fatalf("failed batch changed membership: %v", got)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_insert`); err != nil {
+		t.Fatal(err)
+	}
+	// The failed batch didn't consume revision 2. Even a batch of entirely
+	// duplicate results can carry a genuinely newer declaration.
+	if n, err := st.Ingest(context.Background(), b, now); err != nil || n != 0 {
+		t.Fatalf("retry: %d, %v", n, err)
+	}
+	if got := snapshotOf(t, st).Targets; len(got) != 0 {
+		t.Fatalf("retry didn't remove old target: %v", got)
+	}
+}
+
 func TestLateSamplesExtendAndSplitRun(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
