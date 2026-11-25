@@ -183,25 +183,27 @@ func csvOr(key string, fallback []string) []string {
 //	PULSE_INGEST_TOKENS_FILE a file of "prober=token" lines, re-read every 2s so a
 //	                         revoked token stops working without a restart
 func ingestAuth(logger *slog.Logger) (*ingestauth.Store, error) {
+	if file := strings.TrimSpace(os.Getenv("PULSE_INGEST_TOKENS_FILE")); file != "" {
+		return ingestauth.New(ingestauth.Options{
+			File: file,
+			OnError: func(err error) {
+				logger.Warn("ingest tokens file unusable, keeping the last good tokens", "error", err)
+			},
+		})
+	}
+
 	static := make(map[string]string, 2)
 	if raw := strings.TrimSpace(os.Getenv("PULSE_INGEST_TOKENS")); raw != "" {
-		for _, pair := range strings.Split(raw, ",") {
+		for i, pair := range strings.Split(raw, ",") {
 			name, token, found := strings.Cut(strings.TrimSpace(pair), "=")
 			if !found || strings.TrimSpace(name) == "" || strings.TrimSpace(token) == "" {
-				return nil, fmt.Errorf("PULSE_INGEST_TOKENS entry %q is not prober=token", strings.TrimSpace(pair))
+				return nil, fmt.Errorf("PULSE_INGEST_TOKENS entry %d is not prober=token", i+1)
 			}
 			static[strings.TrimSpace(name)] = strings.TrimSpace(token)
 		}
-	}
-	if token := strings.TrimSpace(os.Getenv("PULSE_INGEST_TOKEN")); token != "" {
+	} else if token := strings.TrimSpace(os.Getenv("PULSE_INGEST_TOKEN")); token != "" {
 		static[ingestauth.AnyProber] = token
 	}
 
-	return ingestauth.New(ingestauth.Options{
-		Static: static,
-		File:   strings.TrimSpace(os.Getenv("PULSE_INGEST_TOKENS_FILE")),
-		OnError: func(err error) {
-			logger.Warn("ingest tokens file unusable, keeping the last good tokens", "error", err)
-		},
-	})
+	return ingestauth.New(ingestauth.Options{Static: static})
 }

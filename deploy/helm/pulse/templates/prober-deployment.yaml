@@ -17,7 +17,9 @@ spec:
         {{- include "pulse.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: prober
       annotations:
-        checksum/secret: {{ include (print $.Template.BasePath "/viewer-secret.yaml") . | sha256sum }}
+        {{- if not (or .Values.viewer.ingest.existingSecret .Values.viewer.ingest.existingTokensSecret .Values.viewer.ingest.tokens) }}
+        pulse/credential-revision: {{ .Release.Revision | quote }}
+        {{- end }}
         {{- if not .Values.prober.existingConfigMap }}
         checksum/config: {{ include (print $.Template.BasePath "/prober-configmap.yaml") . | sha256sum }}
         {{- end }}
@@ -48,10 +50,14 @@ spec:
             - name: metrics
               containerPort: {{ .Values.prober.metricsPort }}
               protocol: TCP
-          envFrom:
-            # Carries PULSE_INGEST_TOKEN, the only secret the prober needs.
-            - secretRef:
-                name: {{ include "pulse.ingestSecretName" . }}
+          {{- if or .Values.viewer.ingest.existingSecret (not (or .Values.viewer.ingest.tokens .Values.viewer.ingest.existingTokensSecret)) }}
+          env:
+            - name: {{ .Values.prober.tokenEnv | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pulse.proberSecretName" . }}
+                  key: PULSE_INGEST_TOKEN
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

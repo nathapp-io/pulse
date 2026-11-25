@@ -27,7 +27,7 @@ const DefaultTTL = 2 * time.Second
 
 // Options configures a Store.
 type Options struct {
-	// Static maps prober name (or AnyProber) to token.
+	// Static maps prober name (or AnyProber) to token. Ignored if File is set.
 	Static map[string]string
 	// File, when set, is a "prober=token" file re-read every TTL.
 	File string
@@ -40,23 +40,20 @@ type Options struct {
 
 // Store authorises (prober, token) pairs.
 type Store struct {
-	static  map[string]string
 	file    string
 	ttl     time.Duration
 	now     func() time.Time
 	onError func(error)
 
 	mu       sync.Mutex
-	fromFile map[string]string
+	tokens   map[string]string // immutable once published
 	loadedAt time.Time
-	loaded   bool
 }
 
 // New validates the configuration and loads the file, if any, so a broken tokens
 // file fails at startup rather than locking every prober out later.
 func New(opts Options) (*Store, error) {
 	s := &Store{
-		static:  make(map[string]string, len(opts.Static)),
 		file:    opts.File,
 		ttl:     opts.TTL,
 		now:     opts.Now,
@@ -72,20 +69,21 @@ func New(opts Options) (*Store, error) {
 		s.onError = func(error) {}
 	}
 
-	for name, token := range opts.Static {
-		if strings.TrimSpace(token) == "" {
-			return nil, fmt.Errorf("ingest token for %q is empty", name)
-		}
-		s.static[name] = token
-	}
-
 	if s.file != "" {
 		if err := s.reloadLocked(); err != nil {
 			return nil, err
 		}
+	} else {
+		s.tokens = make(map[string]string, len(opts.Static))
+		for name, token := range opts.Static {
+			if strings.TrimSpace(token) == "" {
+				return nil, fmt.Errorf("ingest token for %q is empty", name)
+			}
+			s.tokens[name] = token
+		}
 	}
 
-	if len(s.static) == 0 && len(s.fromFile) == 0 {
+	if len(s.tokens) == 0 {
 		return nil, errors.New("no ingest tokens configured: an open ingest endpoint accepts fabricated history")
 	}
 	return s, nil
@@ -127,23 +125,16 @@ func (s *Store) current() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.file != "" && (!s.loaded || s.now().Sub(s.loadedAt) >= s.ttl) {
+	if s.file != "" && s.now().Sub(s.loadedAt) >= s.ttl {
 		if err := s.reloadLocked(); err != nil {
 			s.onError(err)
 		}
 	}
 
-	out := make(map[string]string, len(s.static)+len(s.fromFile))
-	for name, token := range s.static {
-		out[name] = token
-	}
-	for name, token := range s.fromFile {
-		out[name] = token
-	}
-	return out
+	return s.tokens
 }
 
-// reloadLocked replaces fromFile from disk. The caller holds s.mu.
+// reloadLocked replaces the token set from disk. The caller holds s.mu.
 func (s *Store) reloadLocked() error {
 	data, err := os.ReadFile(s.file)
 	if err != nil {
@@ -153,9 +144,8 @@ func (s *Store) reloadLocked() error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", s.file, err)
 	}
-	s.fromFile = parsed
+	s.tokens = parsed
 	s.loadedAt = s.now()
-	s.loaded = true
 	return nil
 }
 

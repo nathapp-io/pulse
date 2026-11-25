@@ -70,12 +70,13 @@ jobs:
       - name: lint
         run: helm lint deploy/helm/pulse
 
-      - name: render (defaults, ingress, tokens file)
+      - name: render (defaults and ingress)
         run: |
           helm template pulse deploy/helm/pulse > /dev/null
           helm template pulse deploy/helm/pulse --set ingress.enabled=true > /dev/null
-          helm template pulse deploy/helm/pulse \
-            --set viewer.ingest.existingTokensSecret=pulse-ingest > /dev/null
+
+      - name: credential wiring across ingest modes
+        run: python3 deploy/helm/tests/credentials.py
 
       - name: the guards must hold
         run: |

@@ -34,22 +34,27 @@ viewer:
 
   auth:
     # Basic auth for the UI and read API. Either set password here (a Secret is
-    # created) or point at one you manage with existingSecret.
+    # created) or point at one you manage with existingSecret. Supply exactly
+    # one key: PULSE_AUTH_PASSWORD or PULSE_AUTH_PASSWORD_HASH.
     existingSecret: ""
     user: admin
     password: ""
     passwordHash: ""
 
   ingest:
-    # Tokens probers present. Leave empty to let the chart generate a random one.
+    # Externally managed Secret with key PULSE_INGEST_TOKEN. In shared mode
+    # both pods use it; otherwise only the prober reads it. Required for a
+    # deployed chart prober in bound/file modes (match the prober.name entry).
     existingSecret: ""
-    # Shared token: any prober name may use it.
+    # Shared mode: any prober name may use the token. Without an external
+    # Secret the chart uses this value, or generates one when empty.
     token: ""
     # Tokens bound to prober names, e.g.
     #   tokens: "prober-core=tok1,prober-edge=tok2"
     tokens: ""
     # Revocation without a restart: mount "prober=token" lines from a Secret and
-    # they are re-read every 2s. Takes precedence over token/tokens when set.
+    # the viewer reloads the projected file every 2s on use. When set,
+    # static token/tokens are ignored; no wildcard token is generated.
     existingTokensSecret: ""
     tokensSecretKey: ingest-tokens
 
@@ -88,7 +93,7 @@ prober:
   pushInterval: 10s
   pushTimeout: 5s
   queueSize: 10000
-  # Env var the ingest token is read from; never put the token in the config.
+  # Destination env var; the source Secret key is always PULSE_INGEST_TOKEN.
   tokenEnv: PULSE_INGEST_TOKEN
 
   # Probes, as they appear under `probes:` in the prober config. The viewer URL,
