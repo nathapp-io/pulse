@@ -2,7 +2,7 @@
 
 Notable changes, newest first. This project follows [semantic versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.1 — 2026-11-25
 
 - Target status, charts and history now distinguish probers monitoring the same target
   name. `/api/v1/history` accepts `prober`; omitting it for an ambiguous name returns 400.
@@ -14,6 +14,8 @@ Notable changes, newest first. This project follows [semantic versioning](https:
 - A configured ingest token file is authoritative. Helm limits the prober to its own
   token and references externally managed Secrets instead of creating them. See the
   [runbook](docs/runbook.md) when upgrading an existing installation.
+- Helm credential revision counters limit restarts to credential consumers. Remote-only
+  installations no longer report a missing local prober.
 
 ## 0.1.0 — 2026-11-24
 

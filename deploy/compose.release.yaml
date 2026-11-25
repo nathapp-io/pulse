@@ -6,7 +6,7 @@
 #   docker compose -f deploy/compose.release.yaml --env-file .env up -d
 #   open http://localhost:8080/   (HTTP Basic auth with PULSE_AUTH_USER/PASSWORD)
 #
-# Pin PULSE_TAG to a release (e.g. 0.1.0) in production; `latest` tracks main.
+# Pin PULSE_TAG to a release (e.g. 0.1.1) in production; `latest` tracks main.
 # Building from source instead: `docker compose up -d --build` in the repo root.
 name: pulse
 
