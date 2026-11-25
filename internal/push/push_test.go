@@ -227,14 +227,19 @@ func TestRetriesUntilAccepted(t *testing.T) {
 
 	c.Enqueue(testResult("api", time.Now().UTC()))
 
-	waitFor(t, "delivery after retries", func() bool { return rec.count() >= 1 })
+	// The recorder sees the batch before the client receives its HTTP response.
+	// Wait for the client acknowledgement before asserting queue and metrics.
+	waitFor(t, "delivery after retries", func() bool {
+		_, _, succeeded, _ := obs.snapshot()
+		return succeeded > 0
+	})
 
-	_, _, succeeded, failed := obs.snapshot()
+	_, _, _, failed := obs.snapshot()
 	if failed < 2 {
 		t.Fatalf("failed attempts = %d, want at least 2 before success", failed)
 	}
-	if succeeded < 1 {
-		t.Fatalf("succeeded = %d, want at least 1", succeeded)
+	if got := rec.count(); got != 1 {
+		t.Fatalf("accepted batches = %d, want 1", got)
 	}
 	if got := c.Queued(); got != 0 {
 		t.Fatalf("queued = %d, want 0 after acceptance", got)
