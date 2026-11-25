@@ -114,7 +114,7 @@ func TestHistoryDefaultsToOneHour(t *testing.T) {
 	ingestUp(t, v, now.Add(-30*time.Minute))
 	ingestUp(t, v, now.Add(-2*time.Hour))
 
-	results, err := v.History(context.Background(), "api", 0)
+	results, err := v.History(context.Background(), "prober-a", "api", 0)
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}

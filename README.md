@@ -131,6 +131,18 @@ The chart refuses to render when the configuration would silently lose history
 store). Operations, triage and rotation procedures are in
 [`docs/runbook.md`](docs/runbook.md).
 
+## Target identity and history
+
+A target is identified by **prober name and target name**. For example,
+`GET /api/v1/history?prober=edge&target=api&window=6h` returns only `edge`’s
+measurements. Older clients may omit `prober` for unique names; an ambiguous
+name returns HTTP 400 instead of combining measurements from different locations.
+
+On ingest, a prober’s full `targets` list determines which of its targets appear
+in status and counts. Retiring a target does not delete its history; it remains
+queryable by the same pair until normal retention expires. A results-only push
+that omits `targets` does not replace the declaration.
+
 ## Viewer storage
 
 Chosen per deployment, one interface, identical API and behaviour:

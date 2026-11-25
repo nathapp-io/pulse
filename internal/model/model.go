@@ -49,10 +49,12 @@ type Result struct {
 
 // Batch is one push from a prober: the full target list plus new results.
 type Batch struct {
-	Prober     ProberInfo   `json:"prober"`
-	ConfigHash string       `json:"config_hash,omitempty"`
-	Targets    []TargetSpec `json:"targets,omitempty"`
-	Results    []Result     `json:"results"`
+	Prober     ProberInfo `json:"prober"`
+	ConfigHash string     `json:"config_hash,omitempty"`
+	// Targets is authoritative when non-nil, including an explicit empty list.
+	// Keep [] distinct from null (or an omitted field) on the wire.
+	Targets []TargetSpec `json:"targets"`
+	Results []Result     `json:"results"`
 }
 
 // MaxBatchResults bounds a single push, so one bad client cannot exhaust memory.

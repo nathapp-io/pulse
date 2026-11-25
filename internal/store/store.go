@@ -11,6 +11,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -81,6 +82,13 @@ func Open(cfg Config) (Store, error) {
 	}
 }
 
+// ErrAmbiguousTarget means a history lookup without a prober matched several owners.
+var ErrAmbiguousTarget = errors.New("target exists on more than one prober")
+
+type targetKey struct {
+	prober, name string
+}
+
 // Store persists results and answers the viewer's read patterns.
 type Store interface {
 	// Ingest stores a batch idempotently, keyed by (prober, target, at), and
@@ -89,7 +97,8 @@ type Store interface {
 	// Snapshot returns the current state of every prober and target.
 	Snapshot(ctx context.Context) (Snapshot, error)
 	// History returns a target's stored results at or after from, oldest first.
-	History(ctx context.Context, target string, from time.Time) ([]model.Result, error)
+	// An empty prober is allowed only when the target name is unambiguous.
+	History(ctx context.Context, prober, target string, from time.Time) ([]model.Result, error)
 	// Close releases backend resources.
 	Close() error
 }
@@ -120,6 +129,28 @@ type TargetState struct {
 	Maintenance bool
 	Uptime      map[string]float64
 	Latency     map[string]int64
+}
+
+// finish orders both lists and derives each prober's inventory from the same
+// active targets the viewer sees, including targets inferred from results.
+func (s *Snapshot) finish() {
+	sort.Slice(s.Probers, func(i, j int) bool { return s.Probers[i].Info.Name < s.Probers[j].Info.Name })
+	sort.Slice(s.Targets, func(i, j int) bool {
+		a, b := s.Targets[i], s.Targets[j]
+		if a.Spec.Name == b.Spec.Name {
+			return a.Prober < b.Prober
+		}
+		return a.Spec.Name < b.Spec.Name
+	})
+	byProber := make(map[string]*ProberState, len(s.Probers))
+	for i := range s.Probers {
+		p := &s.Probers[i]
+		byProber[p.Info.Name] = p
+	}
+	for _, t := range s.Targets {
+		p := byProber[t.Prober]
+		p.Targets = append(p.Targets, t.Spec)
+	}
 }
 
 // Percentiles computes p50/p95 from raw durations, in milliseconds.

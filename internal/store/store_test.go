@@ -130,7 +130,7 @@ func TestIngestIsIdempotent(t *testing.T) {
 			t.Fatalf("replay: n=%d err=%v, want 0 nil", n, err)
 		}
 
-		history, err := st.History(ctx, "api", now.Add(-time.Hour))
+		history, err := st.History(ctx, "", "api", now.Add(-time.Hour))
 		if err != nil {
 			t.Fatalf("History: %v", err)
 		}
@@ -241,7 +241,7 @@ func TestHistoryWindow(t *testing.T) {
 			t.Fatalf("Ingest: %v", err)
 		}
 
-		history, err := st.History(ctx, "api", base.Add(-time.Minute))
+		history, err := st.History(ctx, "", "api", base.Add(-time.Minute))
 		if err != nil {
 			t.Fatalf("History: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestRetentionPrunesOldResults(t *testing.T) {
 			t.Fatalf("Ingest: %v", err)
 		}
 
-		history, err := st.History(ctx, "api", time.Time{})
+		history, err := st.History(ctx, "", "api", time.Time{})
 		if err != nil {
 			t.Fatalf("History: %v", err)
 		}
@@ -439,7 +439,7 @@ func TestMaintenanceFlagVisibleInHistory(t *testing.T) {
 			t.Fatalf("Ingest: %v", err)
 		}
 
-		history, err := st.History(context.Background(), "api", base.Add(-time.Minute))
+		history, err := st.History(context.Background(), "", "api", base.Add(-time.Minute))
 		if err != nil {
 			t.Fatalf("History: %v", err)
 		}

@@ -17,16 +17,17 @@ type memoryStore struct {
 
 	mu      sync.Mutex
 	probers map[string]*memProber
-	targets map[string]*memTarget
+	targets map[targetKey]*memTarget
 }
 
 type memProber struct {
 	info     model.ProberInfo
 	lastSeen time.Time
-	targets  []model.TargetSpec
+	declared bool // once a list is supplied, results alone cannot activate targets
 }
 
 type memTarget struct {
+	active  bool
 	spec    model.TargetSpec
 	prober  string
 	state   string
@@ -41,7 +42,7 @@ func newMemory(cfg Config) *memoryStore {
 	return &memoryStore{
 		cfg:     cfg,
 		probers: make(map[string]*memProber),
-		targets: make(map[string]*memTarget),
+		targets: make(map[targetKey]*memTarget),
 	}
 }
 
@@ -60,33 +61,49 @@ func (m *memoryStore) Ingest(_ context.Context, b model.Batch, receivedAt time.T
 	}
 	p.info = b.Prober
 	p.lastSeen = receivedAt
-	if len(b.Targets) > 0 {
-		p.targets = b.Targets
+	if b.Targets != nil {
+		p.declared = true
+		for k, t := range m.targets {
+			if k.prober == b.Prober.Name {
+				t.active = false
+			}
+		}
 	}
 
 	// Declared targets exist even before their first result.
 	for _, spec := range b.Targets {
 		t := m.targetOrCreate(spec.Name, b.Prober.Name)
 		t.spec = spec
+		t.active = true
 	}
 
 	stored := 0
 	for _, r := range b.Results {
 		t := m.targetOrCreate(r.Target, b.Prober.Name)
+		if !p.declared {
+			t.active = true
+		}
 		if _, dup := t.seen[r.At.UnixNano()]; dup {
 			continue
 		}
 		t.seen[r.At.UnixNano()] = struct{}{}
+		// Keep history in probe-time order even when a backlog arrives late.
+		i := len(t.points)
+		if i > 0 && r.At.Before(t.points[i-1].At) {
+			i = sort.Search(i, func(i int) bool { return !t.points[i].At.Before(r.At) })
+		}
 		t.points = append(t.points, r)
+		copy(t.points[i+1:], t.points[i:len(t.points)-1])
+		t.points[i] = r
 		t.buckets.Record(r.OK, r.At)
 
 		// "Latest" means latest by probe time, not by arrival order.
 		if t.last.At.IsZero() || !r.At.Before(t.last.At) {
-			t.last = r
-			if state := model.NormalizeState(r.State); state != t.state {
+			if state := model.NormalizeState(r.State); t.last.At.IsZero() || state != t.state {
 				t.state = state
 				t.since = r.At
 			}
+			t.last = r
 		}
 		stored++
 	}
@@ -98,7 +115,8 @@ func (m *memoryStore) Ingest(_ context.Context, b model.Batch, receivedAt time.T
 }
 
 func (m *memoryStore) targetOrCreate(name, prober string) *memTarget {
-	t := m.targets[name]
+	key := targetKey{prober, name}
+	t := m.targets[key]
 	if t == nil {
 		t = &memTarget{
 			spec:    model.TargetSpec{Name: name},
@@ -107,7 +125,7 @@ func (m *memoryStore) targetOrCreate(name, prober string) *memTarget {
 			buckets: uptime.New(),
 			seen:    make(map[int64]struct{}),
 		}
-		m.targets[name] = t
+		m.targets[key] = t
 	}
 	return t
 }
@@ -147,11 +165,13 @@ func (m *memoryStore) Snapshot(_ context.Context) (Snapshot, error) {
 		snap.Probers = append(snap.Probers, ProberState{
 			Info:     p.info,
 			LastSeen: p.lastSeen,
-			Targets:  p.targets,
 		})
 	}
 
 	for _, t := range m.targets {
+		if !t.active {
+			continue
+		}
 		ts := TargetState{
 			Spec:        t.spec,
 			Prober:      t.prober,
@@ -170,16 +190,26 @@ func (m *memoryStore) Snapshot(_ context.Context) (Snapshot, error) {
 		snap.Targets = append(snap.Targets, ts)
 	}
 
-	sortProbers(snap.Probers)
-	sortTargets(snap.Targets)
+	snap.finish()
 	return snap, nil
 }
 
-func (m *memoryStore) History(_ context.Context, target string, from time.Time) ([]model.Result, error) {
+func (m *memoryStore) History(_ context.Context, prober, target string, from time.Time) ([]model.Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	t := m.targets[target]
+	if prober == "" {
+		for k := range m.targets {
+			if k.name != target {
+				continue
+			}
+			if prober != "" {
+				return nil, ErrAmbiguousTarget
+			}
+			prober = k.prober
+		}
+	}
+	t := m.targets[targetKey{prober, target}]
 	if t == nil {
 		return nil, nil
 	}
@@ -214,12 +244,4 @@ func recentDurations(points []model.Result) []int64 {
 		}
 	}
 	return out
-}
-
-func sortProbers(ps []ProberState) {
-	sort.Slice(ps, func(i, j int) bool { return ps[i].Info.Name < ps[j].Info.Name })
-}
-
-func sortTargets(ts []TargetState) {
-	sort.Slice(ts, func(i, j int) bool { return ts[i].Spec.Name < ts[j].Spec.Name })
 }
