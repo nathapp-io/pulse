@@ -29,10 +29,13 @@ viewer:
   staleAfter: 60s
   # Probers that must check in; a declared-but-silent one shows as MISSING, which
   # is the failure that otherwise looks like "no problem here".
+  # Empty defaults to prober.name if the bundled prober runs, otherwise none.
   expectedProbers: []
   logLevel: info
 
   auth:
+    # Increment on password/hash rotation to restart the viewer. Not a digest.
+    revision: 0
     # Basic auth for the UI and read API. Either set password here (a Secret is
     # created) or point at one you manage with existingSecret. Supply exactly
     # one key: PULSE_AUTH_PASSWORD or PULSE_AUTH_PASSWORD_HASH.
@@ -42,6 +45,9 @@ viewer:
     passwordHash: ""
 
   ingest:
+    # Increment on ingest env credential rotation (managed or external Secret).
+    # File-mode viewers reload their Secret and ignore this counter.
+    revision: 0
     # Externally managed Secret with key PULSE_INGEST_TOKEN. In shared mode
     # both pods use it; otherwise only the prober reads it. Required for a
     # deployed chart prober in bound/file modes (match the prober.name entry).

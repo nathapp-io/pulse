@@ -136,6 +136,8 @@ prober:
 
 The sender's token must match the `core` entry. For a viewer with only remote
 probers, set `prober.replicaCount: 0`; no chart sender Secret is needed.
+Set `viewer.expectedProbers` to the remote names that must report. With zero
+bundled replicas and no explicit names, the viewer expects no probers by default.
 `prober.tokenEnv` changes the **destination** env name, not the Secret key.
 
 To revoke without restarting the viewer, remove the entry from the file Secret.
@@ -143,25 +145,32 @@ Allow for Kubernetes to update the projected volume; once updated, the viewer
 reloads on use with a 2 s cache. An empty file revokes all tokens on reload. A
 missing or malformed file keeps the **last good file set** and logs a warning;
 an unreadable, malformed or empty file at startup prevents the viewer starting.
-To rotate rather than revoke, also update the sender's Secret and restart its
-Deployment. For env mode changes, restart each consumer of an externally updated
-Secret. For chart-managed values, `helm upgrade` rolls the affected Deployments.
+To rotate rather than revoke, also update the matching sender credential. For
+chart pods that read ingest credentials from env, increment `viewer.ingest.revision`
+in your saved Helm values and apply the upgrade. Update external Secrets **before**
+the upgrade; change managed token values in the same upgrade. The counter rolls
+the viewer in shared and bound-env modes, and the bundled prober when it uses a
+token. A file-mode viewer does not restart. Restart remote env-based senders
+separately after updating their credentials.
 
 ## 6. Rotate the viewer password
 
 ```sh
 # bcrypt is accepted and preferred over plaintext:
 htpasswd -bnBC 12 "" 'new-password' | tr -d ':\n'
-helm upgrade ... --set viewer.auth.passwordHash='$2y$12$...'
 ```
 
-A live Helm upgrade rolls pods consuming managed credentials using the release
-revision, not a digest of the password. With offline renderers, restart those
-pods or change their `podAnnotations` when env-based credentials rotate. With
-`viewer.auth.existingSecret`, provision exactly one of `PULSE_AUTH_PASSWORD` and
-`PULSE_AUTH_PASSWORD_HASH` in that Secret; after changing it, run
-`kubectl -n monitoring rollout restart deployment/pulse-pulse-viewer`. No password
-is passed to the prober. Browsers may also need a hard reload.
+Set `viewer.auth.passwordHash` in your private Helm values, or update
+`viewer.auth.existingSecret` first (supply exactly one of `PULSE_AUTH_PASSWORD`
+and `PULSE_AUTH_PASSWORD_HASH`). Increment `viewer.auth.revision` in your saved
+values and apply the upgrade. Only the viewer restarts; the prober never reads
+the password. Browsers may also need a hard reload.
+
+Both credential revisions are operator-managed counters (e.g. `0` → `1`), not
+Secret contents, hashes, or Helm release numbers. Keep them unchanged on unrelated
+upgrades. Changing env credential data under the same Secret name and key does
+not by itself restart a pod; bump the corresponding counter on rotation, whether
+you use live Helm or an offline renderer.
 
 ### Credential checklist before upgrading from 0.1.0
 

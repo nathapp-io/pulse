@@ -68,7 +68,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "pulse.expectedProbers" -}}
 {{- if .Values.viewer.expectedProbers -}}
 {{- join "," .Values.viewer.expectedProbers -}}
-{{- else -}}
+{{- else if gt (int .Values.prober.replicaCount) 0 -}}
 {{- .Values.prober.name -}}
 {{- end -}}
 {{- end -}}

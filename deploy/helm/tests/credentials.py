@@ -24,10 +24,19 @@ def render(values):
 
 
 class Credentials(unittest.TestCase):
-    def check(self, values, secrets, auth, ingest, prober, extra_keys=()):
+    def manifests(self, values):
         result = render(values)
         self.assertEqual(result.returncode, 0, result.stderr)
-        docs = [d for d in yaml.safe_load_all(result.stdout) if d]
+        return [d for d in yaml.safe_load_all(result.stdout) if d]
+
+    def pod_templates(self, values):
+        templates = {d["metadata"]["labels"]["app.kubernetes.io/component"]: d["spec"]["template"]
+                     for d in self.manifests(values) if d["kind"] == "Deployment"}
+        self.assertEqual(set(templates), {"viewer", "prober"})
+        return templates
+
+    def check(self, values, secrets, auth, ingest, prober, extra_keys=()):
+        docs = self.manifests(values)
         managed = {d["metadata"]["name"]: set(d["data"]) for d in docs if d["kind"] == "Secret"}
         self.assertEqual(managed, secrets)
         pods = {d["metadata"]["labels"]["app.kubernetes.io/component"]: d["spec"]["template"]["spec"]
@@ -86,6 +95,61 @@ class Credentials(unittest.TestCase):
             "token": "ignored", "tokens": "ignored=too", "existingTokensSecret": "receiver",
             "tokensSecretKey": "bindings", "existingSecret": "sender"}}},
             {}, ("ui", HASH), (FILE, "receiver"), (TOKEN, "sender"), [PASSWORD])
+
+    def test_no_release_revision_dependency(self):
+        # helm template always sets Revision to 1; comparing two renders alone
+        # would miss a rollout on every live upgrade.
+        for path in (CHART / "templates").rglob("*"):
+            if path.is_file():
+                self.assertNotIn(".Release.Revision", path.read_text(), str(path))
+
+    def test_prober_only_and_unrelated_changes(self):
+        before = self.pod_templates({})
+        after = self.pod_templates({"prober": {"pushInterval": "15s"}})
+        self.assertEqual(before["viewer"], after["viewer"])
+        self.assertNotEqual(before["prober"], after["prober"])
+        self.assertEqual(before, self.pod_templates({"ingress": {"enabled": True}}))
+
+    def test_revisions_roll_only_env_consumers(self):
+        for ingest, replicas, ingest_consumers in [
+            ({}, 1, {"viewer", "prober"}),
+            ({"existingSecret": "shared"}, 1, {"viewer", "prober"}),
+            ({"tokens": "prober=fixture", "existingSecret": "sender"}, 1, {"viewer", "prober"}),
+            ({"existingTokensSecret": "receiver", "existingSecret": "sender"}, 1, {"prober"}),
+            ({"tokens": "remote=fixture"}, 0, {"viewer"}),
+            ({"existingTokensSecret": "receiver"}, 0, set()),
+        ]:
+            viewer = {"ingest": ingest, "auth": {"existingSecret": "ui"} if ingest else {}}
+            values = {"viewer": viewer, "prober": {"replicaCount": replicas}}
+            before = self.pod_templates(values)
+            for section, consumers in [("auth", {"viewer"}), ("ingest", ingest_consumers)]:
+                with self.subTest(ingest=ingest, section=section):
+                    changed = {**viewer, section: {**viewer[section], "revision": 2}}
+                    after = self.pod_templates({**values, "viewer": changed})
+                    self.assertEqual({role for role in before if before[role] != after[role]}, consumers)
+
+    def test_inline_credentials_change_only_secrets(self):
+        for auth_key in ["password", "passwordHash"]:
+            for ingest_key in ["token", "tokens"]:
+                with self.subTest(auth_key=auth_key, ingest_key=ingest_key):
+                    def readable(value):
+                        ingest = ({"tokens": "prober=" + value, "existingSecret": "sender"}
+                                  if ingest_key == "tokens" else {"token": value})
+                        docs = self.manifests({"viewer": {"auth": {auth_key: value}, "ingest": ingest}})
+                        return [d for d in docs if d["kind"] != "Secret"]
+
+                    self.assertEqual(readable("fixture-one"), readable("fixture-two"))
+
+    def test_expected_probers(self):
+        for replicas, viewer, expected in [
+            (1, {}, "bundled"),
+            (0, {}, ""),
+            (0, {"expectedProbers": ["remote-west", "remote-east"]}, "remote-west,remote-east"),
+        ]:
+            with self.subTest(replicas=replicas, viewer=viewer):
+                pods = self.pod_templates({"viewer": viewer, "prober": {"replicaCount": replicas, "name": "bundled"}})
+                env = pods["viewer"]["spec"]["containers"][0]["env"]
+                self.assertEqual([e["value"] for e in env if e["name"] == "PULSE_EXPECTED_PROBERS"], [expected])
 
     def test_incomplete_or_conflicting_config(self):
         for values, message in [

@@ -1,3 +1,4 @@
+{{- $usesIngestEnv := or .Values.viewer.ingest.existingSecret (not (or .Values.viewer.ingest.tokens .Values.viewer.ingest.existingTokensSecret)) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,11 +18,12 @@ spec:
         {{- include "pulse.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: prober
       annotations:
-        {{- if not (or .Values.viewer.ingest.existingSecret .Values.viewer.ingest.existingTokensSecret .Values.viewer.ingest.tokens) }}
-        pulse/credential-revision: {{ .Release.Revision | quote }}
+        {{- if $usesIngestEnv }}
+        pulse/ingest-revision: {{ .Values.viewer.ingest.revision | quote }}
         {{- end }}
         {{- if not .Values.prober.existingConfigMap }}
-        checksum/config: {{ include (print $.Template.BasePath "/prober-configmap.yaml") . | sha256sum }}
+        {{- $configMap := include (print $.Template.BasePath "/prober-configmap.yaml") . | fromYaml }}
+        checksum/config: {{ index $configMap.data "config.yaml" | sha256sum }}
         {{- end }}
         {{- with .Values.prober.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -50,7 +52,7 @@ spec:
             - name: metrics
               containerPort: {{ .Values.prober.metricsPort }}
               protocol: TCP
-          {{- if or .Values.viewer.ingest.existingSecret (not (or .Values.viewer.ingest.tokens .Values.viewer.ingest.existingTokensSecret)) }}
+          {{- if $usesIngestEnv }}
           env:
             - name: {{ .Values.prober.tokenEnv | quote }}
               valueFrom:
