@@ -76,3 +76,19 @@ func TestSevenDayWindowUsesHourBuckets(t *testing.T) {
 		t.Fatalf("7d ratio = %v, want %v", got, want)
 	}
 }
+
+func TestDelayedProbeUsesOriginalBucket(t *testing.T) {
+	b := New()
+	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	b.Record(true, at)
+	b.Record(false, at.Add(-2*time.Hour))
+	b.Record(false, at.Add(-8*24*time.Hour))
+	for _, tc := range []struct {
+		window time.Duration
+		want   float64
+	}{{time.Hour, 1}, {3 * time.Hour, 0.5}, {7 * 24 * time.Hour, 0.5}} {
+		if got := b.Ratio(tc.window); got != tc.want {
+			t.Errorf("Ratio(%s)=%v, want %v", tc.window, got, tc.want)
+		}
+	}
+}

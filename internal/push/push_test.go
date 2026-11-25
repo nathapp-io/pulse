@@ -167,6 +167,38 @@ func TestFlushSendsBatch(t *testing.T) {
 	waitFor(t, "an empty queue", func() bool { return c.Queued() == 0 })
 }
 
+func TestInventoryRevisionFollowsSnapshotNotMeasurementTime(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.handler())
+	defer srv.Close()
+	inventory := []model.TargetSpec{{Name: "old"}}
+	c := newClient(t, srv.URL, nil, func(cfg *Config) { cfg.Targets = func() []model.TargetSpec { return inventory } })
+	now := time.Now().UTC()
+	c.now = func() time.Time { return now }
+	flush := func(at time.Time) {
+		t.Helper()
+		c.Enqueue(testResult("old", at))
+		if err := c.flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush(now)
+	// The newly loaded inventory is attached to older backlog while wall time
+	// moves backwards. It must still supersede the preceding declaration.
+	inventory = []model.TargetSpec{{Name: "new"}}
+	now = now.Add(-time.Second)
+	flush(now.Add(-time.Hour))
+	inventory = nil
+	flush(now)
+	got := rec.all()
+	if len(got) != 3 {
+		t.Fatalf("got %d batches, want 3", len(got))
+	}
+	if got[0].InventoryRevision <= 0 || got[1].InventoryRevision <= got[0].InventoryRevision || got[1].Targets[0].Name != "new" || got[2].InventoryRevision != 0 {
+		t.Errorf("wrong inventory revisions: %d %d %d", got[0].InventoryRevision, got[1].InventoryRevision, got[2].InventoryRevision)
+	}
+}
+
 func TestFlushNowBeatsTheInterval(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(rec.handler())
@@ -227,14 +259,19 @@ func TestRetriesUntilAccepted(t *testing.T) {
 
 	c.Enqueue(testResult("api", time.Now().UTC()))
 
-	waitFor(t, "delivery after retries", func() bool { return rec.count() >= 1 })
+	// The recorder sees the batch before the client receives its HTTP response.
+	// Wait for the client acknowledgement before asserting queue and metrics.
+	waitFor(t, "delivery after retries", func() bool {
+		_, _, succeeded, _ := obs.snapshot()
+		return succeeded > 0
+	})
 
-	_, _, succeeded, failed := obs.snapshot()
+	_, _, _, failed := obs.snapshot()
 	if failed < 2 {
 		t.Fatalf("failed attempts = %d, want at least 2 before success", failed)
 	}
-	if succeeded < 1 {
-		t.Fatalf("succeeded = %d, want at least 1", succeeded)
+	if got := rec.count(); got != 1 {
+		t.Fatalf("accepted batches = %d, want 1", got)
 	}
 	if got := c.Queued(); got != 0 {
 		t.Fatalf("queued = %d, want 0 after acceptance", got)

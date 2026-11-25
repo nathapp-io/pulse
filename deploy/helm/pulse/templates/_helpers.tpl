@@ -42,11 +42,25 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "pulse.viewerSecretName" -}}
-{{- default (printf "%s-viewer" (include "pulse.fullname" .)) .Values.viewer.auth.existingSecret -}}
+{{- default (printf "%s-auth" (include "pulse.fullname" .)) .Values.viewer.auth.existingSecret -}}
 {{- end -}}
 
-{{- define "pulse.ingestSecretName" -}}
-{{- default (include "pulse.viewerSecretName" .) .Values.viewer.ingest.existingSecret -}}
+{{/* Keep the legacy combined Secret name for managed ingest credentials so
+     lookup reuses the shared token on upgrade. Never derive it from auth. */}}
+{{- define "pulse.managedIngestSecretName" -}}
+{{- printf "%s-viewer" (include "pulse.fullname" .) -}}
+{{- end -}}
+
+{{/* Non-empty only when we own the viewer's ingest Secret: inline bound
+     tokens, or shared mode without an external Secret. */}}
+{{- define "pulse.managesIngest" -}}
+{{- with .Values.viewer.ingest -}}
+{{- if and (not .existingTokensSecret) (or .tokens (not .existingSecret)) -}}yes{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "pulse.proberSecretName" -}}
+{{- default (include "pulse.managedIngestSecretName" .) .Values.viewer.ingest.existingSecret -}}
 {{- end -}}
 
 {{/* Expected probers default to the chart's own prober, so MISSING means
@@ -54,7 +68,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "pulse.expectedProbers" -}}
 {{- if .Values.viewer.expectedProbers -}}
 {{- join "," .Values.viewer.expectedProbers -}}
-{{- else -}}
+{{- else if gt (int .Values.prober.replicaCount) 0 -}}
 {{- .Values.prober.name -}}
 {{- end -}}
 {{- end -}}
@@ -66,5 +80,22 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- if and .Values.viewer.persistence.enabled (eq .Values.viewer.store "memory") -}}
 {{- fail "viewer.persistence.enabled is true but viewer.store is memory, which keeps nothing on disk. Set persistence.enabled=false or store=sqlite." -}}
+{{- end -}}
+{{- end -}}
+
+{{/* A managed name must never alias any externally supplied Secret, even if
+     it serves a different role. Validation doesn't require cluster access. */}}
+{{- define "pulse.validateSecrets" -}}
+{{- $auth := .Values.viewer.auth -}}
+{{- $ingest := .Values.viewer.ingest -}}
+{{- $external := list $auth.existingSecret $ingest.existingSecret $ingest.existingTokensSecret -}}
+{{- if and (not $auth.existingSecret) (has (include "pulse.viewerSecretName" .) $external) -}}
+{{- fail "an existing Secret name collides with the chart-managed auth Secret; use a distinct external name" -}}
+{{- end -}}
+{{- if and (include "pulse.managesIngest" .) (has (include "pulse.managedIngestSecretName" .) $external) -}}
+{{- fail "an existing Secret name collides with the chart-managed ingest Secret; use a distinct external name" -}}
+{{- end -}}
+{{- if and (or $ingest.tokens $ingest.existingTokensSecret) (not $ingest.existingSecret) (gt (int .Values.prober.replicaCount) 0) -}}
+{{- fail "bound and file modes require viewer.ingest.existingSecret containing PULSE_INGEST_TOKEN for the chart prober, or prober.replicaCount=0" -}}
 {{- end -}}
 {{- end -}}

@@ -1,3 +1,5 @@
+{{- include "pulse.validate" . -}}
+{{- include "pulse.validateSecrets" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,7 +23,10 @@ spec:
         {{- include "pulse.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: viewer
       annotations:
-        checksum/secret: {{ include (print $.Template.BasePath "/viewer-secret.yaml") . | sha256sum }}
+        pulse/auth-revision: {{ .Values.viewer.auth.revision | quote }}
+        {{- if not .Values.viewer.ingest.existingTokensSecret }}
+        pulse/ingest-revision: {{ .Values.viewer.ingest.revision | quote }}
+        {{- end }}
         {{- with .Values.viewer.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -67,13 +72,38 @@ spec:
               value: {{ include "pulse.expectedProbers" . | quote }}
             - name: PULSE_AUTH_USER
               value: {{ .Values.viewer.auth.user | quote }}
+            {{- $authKeys := list "PULSE_AUTH_PASSWORD" }}
+            {{- if .Values.viewer.auth.existingSecret }}
+            {{- $authKeys = list "PULSE_AUTH_PASSWORD" "PULSE_AUTH_PASSWORD_HASH" }}
+            {{- else if .Values.viewer.auth.passwordHash }}
+            {{- $authKeys = list "PULSE_AUTH_PASSWORD_HASH" }}
+            {{- end }}
+            {{- range $key := $authKeys }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pulse.viewerSecretName" $ }}
+                  key: {{ $key }}
+                  {{- if $.Values.viewer.auth.existingSecret }}
+                  optional: true # the Secret can supply either password or hash
+                  {{- end }}
+            {{- end }}
             {{- if .Values.viewer.ingest.existingTokensSecret }}
             - name: PULSE_INGEST_TOKENS_FILE
               value: /etc/pulse/ingest-tokens
+            {{- else if .Values.viewer.ingest.tokens }}
+            - name: PULSE_INGEST_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pulse.managedIngestSecretName" . }}
+                  key: PULSE_INGEST_TOKENS
+            {{- else }}
+            - name: PULSE_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pulse.proberSecretName" . }}
+                  key: PULSE_INGEST_TOKEN
             {{- end }}
-          envFrom:
-            - secretRef:
-                name: {{ include "pulse.viewerSecretName" . }}
           livenessProbe:
             httpGet:
               path: /healthz

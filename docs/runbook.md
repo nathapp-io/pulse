@@ -112,33 +112,91 @@ zero is the only case where history has a hole.
 
 ## 5. Rotate or revoke an ingest token
 
-**Without a restart** (tokens file):
+Choose **one viewer source**. The viewer checks `PULSE_INGEST_TOKENS_FILE` first,
+then `PULSE_INGEST_TOKENS`, then the shared `PULSE_INGEST_TOKEN`. It does not
+merge sources or use a shared token as a fallback for a missing binding.
 
-```sh
-kubectl -n monitoring create secret generic pulse-ingest-tokens \
-  --from-literal=ingest-tokens=$'prober-core=tok1\nprober-edge=tok2' \
-  --dry-run=client -o yaml | kubectl apply -f -
+| Mode | Viewer | Chart prober |
+|---|---|---|
+| Shared (default) | `PULSE_INGEST_TOKEN` from `viewer.ingest.existingSecret`, or a managed Secret using `viewer.ingest.token` (random if empty) | Same Secret, same key |
+| Bound env | `viewer.ingest.tokens` as `PULSE_INGEST_TOKENS` (comma-separated `name=token` pairs) | Set `viewer.ingest.existingSecret` to a Secret containing only this sender's `PULSE_INGEST_TOKEN` |
+| Bound file | `viewer.ingest.existingTokensSecret` projected as a file (`tokensSecretKey`, default `ingest-tokens`; one `name=token` per line) | Same sender setup as bound env; the prober does not mount the viewer's file |
+
+For example, provision the two file-mode Secrets in `monitoring` before the upgrade,
+then set:
+
+```yaml
+viewer:
+  ingest:
+    existingTokensSecret: pulse-receiver  # key: ingest-tokens
+    existingSecret: pulse-sender          # key: PULSE_INGEST_TOKEN
+prober:
+  name: core
 ```
 
-Point the chart at it with `viewer.ingest.existingTokensSecret`. The viewer re-reads
-the file every 2 s, so a removed prober starts getting `401` within one push interval.
-Its results then queue (not lost) until you give it a new token.
+The sender's token must match the `core` entry. For a viewer with only remote
+probers, set `prober.replicaCount: 0`; no chart sender Secret is needed.
+Set `viewer.expectedProbers` to the remote names that must report. With zero
+bundled replicas and no explicit names, the viewer expects no probers by default.
+`prober.tokenEnv` changes the **destination** env name, not the Secret key.
 
-**With a restart** (env): `helm upgrade ... --set viewer.ingest.tokens="prober-core=tok1"`.
-
-A malformed file does **not** lock everyone out: the viewer keeps the last good set and
-logs `ingest tokens file unusable`.
+To revoke without restarting the viewer, remove the entry from the file Secret.
+Allow for Kubernetes to update the projected volume; once updated, the viewer
+reloads on use with a 2 s cache. An empty file revokes all tokens on reload. A
+missing or malformed file keeps the **last good file set** and logs a warning;
+an unreadable, malformed or empty file at startup prevents the viewer starting.
+To rotate rather than revoke, also update the matching sender credential. For
+chart pods that read ingest credentials from env, increment `viewer.ingest.revision`
+in your saved Helm values and apply the upgrade. Update external Secrets **before**
+the upgrade; change managed token values in the same upgrade. The counter rolls
+the viewer in shared and bound-env modes, and the bundled prober when it uses a
+token. A file-mode viewer does not restart. Restart remote env-based senders
+separately after updating their credentials.
 
 ## 6. Rotate the viewer password
 
 ```sh
 # bcrypt is accepted and preferred over plaintext:
 htpasswd -bnBC 12 "" 'new-password' | tr -d ':\n'
-helm upgrade ... --set viewer.auth.passwordHash='$2y$12$...'
 ```
 
-Pods roll automatically (the Secret checksum is an annotation). Browsers cache Basic
-credentials per session — a hard reload is usually enough.
+Set `viewer.auth.passwordHash` in your private Helm values, or update
+`viewer.auth.existingSecret` first (supply exactly one of `PULSE_AUTH_PASSWORD`
+and `PULSE_AUTH_PASSWORD_HASH`). Increment `viewer.auth.revision` in your saved
+values and apply the upgrade. Only the viewer restarts; the prober never reads
+the password. Browsers may also need a hard reload.
+
+Both credential revisions are operator-managed counters (e.g. `0` → `1`), not
+Secret contents, hashes, or Helm release numbers. Keep them unchanged on unrelated
+upgrades. Changing env credential data under the same Secret name and key does
+not by itself restart a pod; bump the corresponding counter on rotation, whether
+you use live Helm or an offline renderer.
+
+### Credential checklist before upgrading from 0.1.0
+
+- **Default managed credentials:** keep the same release name and namespace and
+  reapply your auth values. Auth keys move to `<fullname>-auth`. The managed
+  ingest Secret keeps the old `<fullname>-viewer` name: a live Helm upgrade
+  uses `lookup` to reuse its `PULSE_INGEST_TOKEN` rather than rotate it. An
+  offline `helm template` cannot do that lookup. For GitOps/offline rendering,
+  provision a stable external Secret first instead of relying on generation.
+- **Old combined or custom-named Secret:** check the old release manifest
+  privately before upgrading (it contains credentials). Older charts could
+  include `viewer.auth.existingSecret` as a Helm-managed resource; simply
+  switching it to reference-only can cause Helm to **delete** it on upgrade.
+  Before upgrading, securely copy the needed keys (including the old generated
+  `PULSE_INGEST_TOKEN` if keeping shared mode) to a **new**, separately
+  managed Secret. Set both `viewer.auth.existingSecret` and
+  `viewer.ingest.existingSecret` to the new name, or split the keys between
+  two Secrets. Do not point either value at a retiring Helm-owned Secret.
+  A genuinely external combined Secret can be referenced by both settings.
+- **Bound/file installs:** add every intended name to the authoritative list,
+  including the chart prober. Provision its matching sender Secret as in §5;
+  it no longer inherits all keys from the viewer Secret. If using a custom
+  `prober.tokenEnv`, ensure the source key is named `PULSE_INGEST_TOKEN`.
+  Remove stale static credentials; they will not be used as a fallback.
+- Use a viewer image containing the file-precedence fix. After upgrade, verify
+  both rollouts and that each expected prober checks in (§2).
 
 ## 7. Disk growth and retention
 

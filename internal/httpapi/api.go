@@ -16,6 +16,7 @@ import (
 
 	"pulse/internal/ingestauth"
 	"pulse/internal/model"
+	"pulse/internal/store"
 	"pulse/internal/ui"
 	"pulse/internal/viewer"
 )
@@ -234,7 +235,12 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 		window = h.cfg.MaxHistoryWindow
 	}
 
-	results, err := h.v.History(r.Context(), target, window)
+	prober := r.URL.Query().Get("prober")
+	results, err := h.v.History(r.Context(), prober, target, window)
+	if errors.Is(err, store.ErrAmbiguousTarget) {
+		http.Error(w, "target name is ambiguous; specify prober", http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		h.logger.Error("history failed", "target", target, "error", err)
 		http.Error(w, "history unavailable", http.StatusInternalServerError)
@@ -244,6 +250,7 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 		results = []model.Result{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"prober":  prober,
 		"target":  target,
 		"window":  window.String(),
 		"results": results,

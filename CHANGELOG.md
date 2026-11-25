@@ -2,6 +2,21 @@
 
 Notable changes, newest first. This project follows [semantic versioning](https://semver.org/).
 
+## 0.1.1 — 2026-11-25
+
+- Target status, charts and history now distinguish probers monitoring the same target
+  name. `/api/v1/history` accepts `prober`; omitting it for an ambiguous name returns 400.
+- A full target declaration retires removed targets without erasing their history. Replaying
+  an older declaration does not reactivate retired targets. Both stores report active targets
+  per prober and account for late observations when reporting when the current state began.
+  Upgrade the viewer before probers that send the new `inventory_revision` field.
+- HTTP time-to-first-byte measurements now work on reused connections.
+- A configured ingest token file is authoritative. Helm limits the prober to its own
+  token and references externally managed Secrets instead of creating them. See the
+  [runbook](docs/runbook.md) when upgrading an existing installation.
+- Helm credential revision counters limit restarts to credential consumers. Remote-only
+  installations no longer report a missing local prober.
+
 ## 0.1.0 — 2026-11-24
 
 First release. A push-based uptime monitor: probers dial out, the viewer owns history and

@@ -119,6 +119,72 @@ func TestIngestStoresAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// Exercise the actual ingest/status/history contract, not just the storage keys.
+func TestHistoryAndStatusAreScopedToProber(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			st, err := store.Open(store.Config{Kind: kind, Path: filepath.Join(t.TempDir(), "test.db")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			h := New(viewer.New(st, viewer.Config{}), Config{Ingest: newIngestAuth(t, map[string]string{ingestauth.AnyProber: testToken})}, nil)
+			at := time.Now().UTC()
+			send := func(b model.Batch) {
+				t.Helper()
+				body, err := json.Marshal(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if rec := postIngest(t, h, testToken, body); rec.Code != http.StatusNoContent {
+					t.Fatalf("ingest: %d %s", rec.Code, rec.Body.String())
+				}
+			}
+			east, west := sampleBatch(at), sampleBatch(at)
+			east.Prober.Name, west.Prober.Name = "east", "west"
+			east.InventoryRevision, west.InventoryRevision = 1, 1
+			west.Results[0].OK, west.Results[0].State = false, "DOWN"
+			send(east)
+			send(west)
+			status := func() viewer.Status {
+				t.Helper()
+				rec := get(t, h, "/api/v1/status", nil)
+				var s viewer.Status
+				if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+					t.Fatal(err)
+				}
+				return s
+			}
+			s := status()
+			if s.Summary.Targets != 2 || s.Summary.Down != 1 || s.Summary.Up != 1 || len(s.Probers) != 2 || s.Probers[0].Targets != 1 || s.Probers[1].Targets != 1 {
+				t.Fatalf("status: %+v", s)
+			}
+			if rec := get(t, h, "/api/v1/history?target=api", nil); rec.Code != http.StatusBadRequest {
+				t.Fatalf("ambiguous history returned %d", rec.Code)
+			}
+			// A reload retires only this prober's api; its history remains addressable.
+			newEast := sampleBatch(at)
+			newEast.Prober.Name, newEast.InventoryRevision = "east", 2
+			newEast.Targets[0].Name, newEast.Results[0].Target = "web", "web"
+			send(newEast)
+			send(east) // exact replay of revision 1 must not bring api back
+			if s := status(); len(s.Targets) != 2 || s.Targets[0].Name != "api" || s.Targets[0].Prober != "west" || s.Targets[1].Name != "web" || s.Targets[1].Prober != "east" {
+				t.Fatalf("status after reload: %+v", s.Targets)
+			}
+			for _, prober := range []string{"east", "west"} {
+				rec := get(t, h, "/api/v1/history?target=api&prober="+prober, nil)
+				var payload struct{ Results []model.Result }
+				if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if rec.Code != http.StatusOK || len(payload.Results) != 1 || payload.Results[0].OK != (prober == "east") {
+					t.Fatalf("%s history: %d %s", prober, rec.Code, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestIngestRejectsUnknownFields(t *testing.T) {
 	h := newTestHandler(t, Config{})
 	body := []byte(`{"prober":{"name":"p"},"results":[{"target":"api","at":"2026-01-01T00:00:00Z"}],"typo_field":true}`)

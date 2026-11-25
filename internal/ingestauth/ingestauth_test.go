@@ -90,6 +90,24 @@ func TestFileTokenRevocationTakesEffectWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestFileConfigurationDoesNotMergeStaticNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("core=fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{File: path, Static: map[string]string{AnyProber: "unused", "edge": "unused"}}
+	store := mustNew(t, opts)
+	if names := store.ProberNames(); len(names) != 1 || names[0] != "core" {
+		t.Fatalf("configured names = %v, want only core", names)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(opts); err == nil {
+		t.Fatal("empty startup file must not select a static credential")
+	}
+}
+
 func TestStaleFileKeepsLastGoodTokens(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tokens")

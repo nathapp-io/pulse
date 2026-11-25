@@ -78,6 +78,9 @@ type Client struct {
 
 	notify chan struct{}
 
+	// Only the delivery loop takes inventory snapshots, including during its final flush.
+	lastInventoryRevision int64
+
 	// now is injectable for tests.
 	now func() time.Time
 }
@@ -273,6 +276,18 @@ func (c *Client) flush(ctx context.Context) error {
 	}
 	if c.cfg.Targets != nil {
 		payload.Targets = c.cfg.Targets()
+		if payload.Targets != nil {
+			// Stamp the declaration, not the queued measurements: after a reload
+			// a fresh target list can travel with hours-old samples. Wall time
+			// orders snapshots across restarts; the floor handles clock steps
+			// and repeated timestamps while this sender is running.
+			revision := c.now().UnixNano()
+			if revision <= c.lastInventoryRevision {
+				revision = c.lastInventoryRevision + 1
+			}
+			payload.InventoryRevision = revision
+			c.lastInventoryRevision = revision
+		}
 	}
 	for _, e := range batch {
 		payload.Results = append(payload.Results, e.r)

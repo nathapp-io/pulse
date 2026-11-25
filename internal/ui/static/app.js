@@ -7,6 +7,7 @@
   const HISTORY_WINDOW = "6h";
 
   let chart = null;
+  let targets = [];
   let selected = null;
   let chartFetchedAt = 0;
 
@@ -114,8 +115,8 @@
       const planned = t.maintenance
         ? `<p class="planned">planned maintenance — recorded, not alarmed</p>`
         : "";
-      return `<article class="card ${state}" data-target="${escapeHTML(t.name)}" tabindex="0"
-                       role="button" aria-label="Show history for ${escapeHTML(t.name)}">
+      return `<article class="card ${state}" data-target="${escapeHTML(t.name)}" data-prober="${escapeHTML(t.prober)}" tabindex="0"
+                       role="button" aria-label="Show history for ${escapeHTML(t.name)} on ${escapeHTML(t.prober)}">
         <header>
           <span class="pill ${state}">${escapeHTML(t.state)}</span>
           <strong>${escapeHTML(t.name)}</strong>
@@ -204,21 +205,33 @@
       `state since ${target.since ? new Date(target.since).toLocaleString() : "unknown"}`;
   }
 
-  async function selectTarget(name) {
-    selected = name;
+  function findTarget(prober, name) {
+    return targets.find((t) => t.prober === prober && t.name === name);
+  }
+
+  async function selectTarget(prober, name) {
+    if (!findTarget(prober, name)) return;
+    if (!selected || selected.prober !== prober || selected.name !== name) {
+      destroyChart();
+      $("#chart").textContent = "Loading history…";
+      $("#detail-meta").textContent = "";
+      $("#import-url").textContent = "";
+    }
+    // A slow previous request must not draw one prober's data under another's title.
+    const selection = { prober, name };
+    selected = selection;
     $("#detail").hidden = false;
-    $("#detail-title").textContent = name;
+    $("#detail-title").textContent = `${name} · ${prober}`;
     chartFetchedAt = Date.now();
     try {
-      const payload = await api(
-        `/api/v1/history?target=${encodeURIComponent(name)}&window=${HISTORY_WINDOW}`);
+      const query = new URLSearchParams({ prober, target: name, window: HISTORY_WINDOW });
+      const payload = await api(`/api/v1/history?${query}`);
+      if (selected !== selection) return;
       const results = payload.results || [];
       drawChart(results);
-      const status = await api("/api/v1/status");
-      const target = (status.targets || []).find((t) => t.name === name) || {};
-      renderDetailMeta(target, results);
+      renderDetailMeta(findTarget(prober, name), results);
     } catch (err) {
-      banner(err.message);
+      if (selected === selection) banner(err.message);
     }
   }
 
@@ -228,14 +241,15 @@
       banner("");
       renderSummary(status);
       renderProbers(status.probers || []);
-      renderTargets(status.targets || []);
+      targets = status.targets || [];
+      renderTargets(targets);
 
-      if (selected && !(status.targets || []).some((t) => t.name === selected)) {
+      if (selected && !findTarget(selected.prober, selected.name)) {
         selected = null;
         $("#detail").hidden = true;
         destroyChart();
       } else if (selected && Date.now() - chartFetchedAt > CHART_REFRESH_MS) {
-        await selectTarget(selected);
+        await selectTarget(selected.prober, selected.name);
       }
     } catch (err) {
       banner(err.message);
@@ -250,14 +264,14 @@
 
   document.addEventListener("click", (event) => {
     const card = event.target.closest("[data-target]");
-    if (card) selectTarget(card.dataset.target);
+    if (card) selectTarget(card.dataset.prober, card.dataset.target);
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     const card = event.target.closest("[data-target]");
     if (!card) return;
     event.preventDefault();
-    selectTarget(card.dataset.target);
+    selectTarget(card.dataset.prober, card.dataset.target);
   });
 
   $("#refresh").addEventListener("click", refresh);

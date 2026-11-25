@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pulse/internal/config"
@@ -92,34 +93,9 @@ func (h *HTTP) Probe(ctx context.Context) Result {
 	ctx, cancel := context.WithTimeout(ctx, p.Timeout.D())
 	defer cancel()
 
-	var dnsStart, connStart, tlsStart time.Time
-	var dns, conn, tlsHS time.Duration
-	var connDone, tlsDone, firstByte time.Time
+	phases := new(httpPhases)
 
-	trace := &httptrace.ClientTrace{
-		DNSStart:     func(httptrace.DNSStartInfo) { dnsStart = time.Now() },
-		DNSDone:      func(httptrace.DNSDoneInfo) { dns = time.Since(dnsStart) },
-		ConnectStart: func(_, _ string) { connStart = time.Now() },
-		ConnectDone: func(_, _ string, err error) {
-			// Only a successful connect is recorded: leaving connDone zero on
-			// failure is what keeps a connect timeout classified as
-			// CONNECT_TIMEOUT rather than "the server is slow".
-			if err == nil {
-				connDone = time.Now()
-				conn = connDone.Sub(connStart)
-			}
-		},
-		TLSHandshakeStart: func() { tlsStart = time.Now() },
-		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
-			tlsDone = time.Now()
-			if err == nil {
-				tlsHS = tlsDone.Sub(tlsStart)
-			}
-		},
-		GotFirstResponseByte: func() { firstByte = time.Now() },
-	}
-
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), p.Method, p.URL, nil)
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, phases.trace()), p.Method, p.URL, nil)
 	if err != nil {
 		return fail(res, start, ClassError, err)
 	}
@@ -131,12 +107,10 @@ func (h *HTTP) Probe(ctx context.Context) Result {
 	}
 
 	resp, err := h.client.Do(req)
+	timing := phases.snapshot()
 	if err != nil {
-		// A connection that was established means the failure happened while
-		// waiting for the response, which is a slow server, not an unreachable
-		// one. connDone is only set on a successful connect (see above).
 		phase := PhaseConnect
-		if !connDone.IsZero() || !tlsDone.IsZero() || !firstByte.IsZero() {
+		if !timing.gotConn.IsZero() {
 			phase = PhaseTTFB
 		}
 		return fail(res, start, Classify(err, phase), err)
@@ -152,23 +126,17 @@ func (h *HTTP) Probe(ctx context.Context) Result {
 		res.TLSExpiry = resp.TLS.PeerCertificates[0].NotAfter
 	}
 
-	res.PhaseMS[PhaseDNS] = dns.Milliseconds()
-	res.PhaseMS[PhaseConnect] = conn.Milliseconds()
-	res.PhaseMS[PhaseTLS] = tlsHS.Milliseconds()
-	if !firstByte.IsZero() {
-		base := connDone
-		if !tlsDone.IsZero() {
-			base = tlsDone
-		}
-		if firstByte.After(base) {
-			res.PhaseMS[PhaseTTFB] = firstByte.Sub(base).Milliseconds()
-		}
+	res.PhaseMS[PhaseDNS] = timing.dns.Milliseconds()
+	res.PhaseMS[PhaseConnect] = timing.connect.Milliseconds()
+	res.PhaseMS[PhaseTLS] = timing.tls.Milliseconds()
+	if !timing.firstByte.IsZero() && !timing.gotConn.IsZero() {
+		res.PhaseMS[PhaseTTFB] = timing.firstByte.Sub(timing.gotConn).Milliseconds()
 	}
 	res.PhaseMS[PhaseTotal] = res.DurationMS
 
 	switch {
 	case readErr != nil:
-		res.ErrorClass = ClassError
+		res.ErrorClass = Classify(readErr, PhaseTotal)
 		res.Error = "read body: " + readErr.Error()
 	case int64(len(body)) > p.MaxBodyBytes:
 		res.ErrorClass = ClassBodyTooLarge
@@ -178,6 +146,97 @@ func (h *HTTP) Probe(ctx context.Context) Result {
 	}
 	res.OK = res.ErrorClass == ClassOK
 	return res
+}
+
+// httptrace hooks may overlap (e.g. Happy Eyeballs) and may run after Do
+// returns. Copy the timings under the same lock used by the hooks; callbacks
+// never touch the Result itself.
+type httpTimings struct {
+	dns, connect, tls  time.Duration
+	gotConn, firstByte time.Time
+}
+
+type httpPhases struct {
+	mu                 sync.Mutex
+	timing             httpTimings
+	dnsStart, tlsStart time.Time
+	connectStarts      map[[2]string]time.Time
+}
+
+func (p *httpPhases) snapshot() httpTimings {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.timing
+}
+
+func (p *httpPhases) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GetConn: func(string) {
+			// A redirect or a transport retry starts a new acquisition.
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.timing = httpTimings{}
+			p.dnsStart, p.tlsStart = time.Time{}, time.Time{}
+			p.connectStarts = nil
+		},
+		DNSStart: func(httptrace.DNSStartInfo) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.dnsStart = time.Now()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.timing.gotConn.IsZero() && !p.dnsStart.IsZero() {
+				p.timing.dns = time.Since(p.dnsStart)
+			}
+		},
+		ConnectStart: func(network, addr string) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.connectStarts == nil {
+				p.connectStarts = make(map[[2]string]time.Time)
+			}
+			p.connectStarts[[2]string{network, addr}] = time.Now()
+		},
+		ConnectDone: func(network, addr string, err error) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			key := [2]string{network, addr}
+			if start, ok := p.connectStarts[key]; ok && err == nil && p.timing.gotConn.IsZero() {
+				p.timing.connect = time.Since(start)
+			}
+			delete(p.connectStarts, key)
+		},
+		TLSHandshakeStart: func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.tlsStart = time.Now()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if err == nil && p.timing.gotConn.IsZero() && !p.tlsStart.IsZero() {
+				p.timing.tls = time.Since(p.tlsStart)
+			}
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if info.Reused {
+				// A speculative dial may have raced the idle connection.
+				p.timing = httpTimings{}
+			}
+			p.timing.gotConn = time.Now()
+		},
+		GotFirstResponseByte: func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.timing.firstByte.IsZero() && !p.timing.gotConn.IsZero() {
+				p.timing.firstByte = time.Now()
+			}
+		},
+	}
 }
 
 func fail(res Result, start time.Time, class ErrorClass, err error) Result {

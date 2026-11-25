@@ -48,11 +48,11 @@ func (v *Viewer) Ingest(ctx context.Context, b model.Batch) (int, error) {
 }
 
 // History returns a target's results for a rolling window.
-func (v *Viewer) History(ctx context.Context, target string, window time.Duration) ([]model.Result, error) {
+func (v *Viewer) History(ctx context.Context, prober, target string, window time.Duration) ([]model.Result, error) {
 	if window <= 0 {
 		window = time.Hour
 	}
-	return v.store.History(ctx, target, v.now().UTC().Add(-window))
+	return v.store.History(ctx, prober, target, v.now().UTC().Add(-window))
 }
 
 // Status is the payload of GET /api/v1/status.
@@ -205,6 +205,11 @@ func (v *Viewer) Status(ctx context.Context) (Status, error) {
 	}
 
 	sort.Slice(st.Probers, func(i, j int) bool { return st.Probers[i].Name < st.Probers[j].Name })
-	sort.Slice(st.Targets, func(i, j int) bool { return st.Targets[i].Name < st.Targets[j].Name })
+	sort.Slice(st.Targets, func(i, j int) bool {
+		if st.Targets[i].Name == st.Targets[j].Name {
+			return st.Targets[i].Prober < st.Targets[j].Prober
+		}
+		return st.Targets[i].Name < st.Targets[j].Name
+	})
 	return st, nil
 }

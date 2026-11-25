@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +19,10 @@ CREATE TABLE IF NOT EXISTS probers (
   version     TEXT NOT NULL DEFAULT '',
   labels      TEXT NOT NULL DEFAULT '{}',
   last_seen   INTEGER NOT NULL,
-  config_hash TEXT NOT NULL DEFAULT ''
+  config_hash TEXT NOT NULL DEFAULT '',
+  declared    INTEGER NOT NULL DEFAULT 0,
+  inventory_versioned INTEGER NOT NULL DEFAULT 0,
+  inventory_order INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS targets (
@@ -30,6 +32,9 @@ CREATE TABLE IF NOT EXISTS targets (
   typ    TEXT NOT NULL DEFAULT '',
   state  TEXT NOT NULL DEFAULT 'UNKNOWN',
   since  INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  latest_at INTEGER,                     -- newest accepted probe time, independent of retention
+  before_run INTEGER,                    -- last differing state before the current run
   PRIMARY KEY (prober, name)
 );
 
@@ -91,22 +96,88 @@ func openSQLite(cfg Config) (*sqliteStore, error) {
 	// removes SQLITE_BUSY entirely and keeps the code single-writer.
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrateSQLite(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
 	}
-
-	// Databases created before maintenance windows existed do not have the
-	// column, and CREATE TABLE IF NOT EXISTS does not add it. SQLite has no
-	// "ADD COLUMN IF NOT EXISTS", so the duplicate-column error is expected and
-	// is the signal that the migration already ran.
-	if _, err := db.Exec(`ALTER TABLE results ADD COLUMN maintenance INTEGER NOT NULL DEFAULT 0`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column name") {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate results.maintenance: %w", err)
-	}
 	return &sqliteStore{cfg: cfg, db: db}, nil
 }
+
+// Older databases had no declaration marker: preserve their visible targets
+// until the prober next sends an authoritative list. Upgrade and backfill in
+// one transaction so an interrupted migration can be retried safely.
+func migrateSQLite(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	for _, c := range []struct{ table, name, definition string }{
+		{"results", "maintenance", "INTEGER NOT NULL DEFAULT 0"},
+		{"probers", "declared", "INTEGER NOT NULL DEFAULT 0"},
+		{"targets", "active", "INTEGER NOT NULL DEFAULT 1"},
+		{"targets", "latest_at", "INTEGER"},
+		{"targets", "before_run", "INTEGER"},
+		{"probers", "inventory_versioned", "INTEGER NOT NULL DEFAULT 0"},
+		{"probers", "inventory_order", "INTEGER"},
+	} {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name=?)`, c.table, c.name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.name + ` ` + c.definition); err != nil {
+			return err
+		}
+		var backfill string
+		switch c.name {
+		case "latest_at":
+			backfill = backfillLatest
+		case "before_run":
+			backfill = backfillRun
+		case "inventory_order":
+			// Old rows didn't distinguish results with/without a declaration.
+			// Use the high-water mark across ALL targets (even inactive/pruned)
+			// as the best available replay fence for previously declared lists.
+			backfill = `UPDATE probers SET inventory_order=(SELECT MAX(latest_at) FROM targets WHERE prober=probers.name) WHERE declared=1`
+		}
+		if backfill != "" {
+			if _, err := tx.Exec(backfill); err != nil {
+				return fmt.Errorf("backfill %s: %w", c.name, err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// A legacy state's since timestamp is not a last-sample watermark: a
+// delayed transition may even have overwritten the state. Use the latest
+// retained sample and the start of its run. Preserve an earlier transition
+// timestamp if the run started before raw retention, and fall back to since
+// as the best known watermark when all raw samples have expired.
+const backfillLatest = `
+UPDATE targets AS t SET latest_at =
+  (SELECT MAX(at) FROM results WHERE prober=t.prober AND target=t.name);
+UPDATE targets SET latest_at=since WHERE since<>0 AND (latest_at IS NULL OR since>latest_at);
+UPDATE targets AS t SET state=r.state, since=COALESCE(
+  (SELECT MIN(at) FROM results WHERE prober=t.prober AND target=t.name AND at >
+    (SELECT MAX(at) FROM results WHERE prober=t.prober AND target=t.name AND state<>r.state)),
+  (SELECT MIN(at) FROM results WHERE prober=t.prober AND target=t.name))
+FROM results AS r WHERE r.prober=t.prober AND r.target=t.name AND r.at=t.latest_at AND r.state<>t.state;`
+
+// The branch schema already has latest_at, but its since could miss late
+// observations. Reconcile the old summary with surviving evidence only once.
+const backfillRun = `
+UPDATE targets AS t SET before_run=(SELECT MAX(at) FROM results WHERE prober=t.prober AND target=t.name AND at<t.latest_at AND state<>t.state);
+UPDATE targets AS t SET since=MIN(
+  CASE WHEN before_run IS NULL OR since>before_run THEN since ELSE latest_at END,
+  COALESCE((SELECT MIN(at) FROM results WHERE prober=t.prober AND target=t.name AND state=t.state AND (t.before_run IS NULL OR at>t.before_run)),latest_at))
+WHERE latest_at IS NOT NULL;`
 
 func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time.Time) (int, error) {
 	if err := b.Validate(); err != nil {
@@ -130,19 +201,16 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 		INSERT INTO probers(name, version, labels, last_seen, config_hash) VALUES(?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			version=excluded.version, labels=excluded.labels,
-			last_seen=excluded.last_seen, config_hash=excluded.config_hash`,
-		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash,
+			last_seen=excluded.last_seen,
+			config_hash=CASE WHEN ? THEN excluded.config_hash ELSE probers.config_hash END`,
+		b.Prober.Name, b.Prober.Version, string(labels), receivedAt.UnixNano(), b.ConfigHash, b.Targets == nil,
 	); err != nil {
 		return 0, fmt.Errorf("upsert prober: %w", err)
 	}
 
-	for _, spec := range b.Targets {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO targets(prober, name, grp, typ, state, since) VALUES(?,?,?,?,'UNKNOWN',0)
-			ON CONFLICT(prober, name) DO UPDATE SET grp=excluded.grp, typ=excluded.typ`,
-			b.Prober.Name, spec.Name, spec.Group, spec.Type,
-		); err != nil {
-			return 0, fmt.Errorf("upsert target %q: %w", spec.Name, err)
+	if b.Targets != nil {
+		if err := reconcileSQLite(ctx, tx, b); err != nil {
+			return 0, err
 		}
 	}
 
@@ -196,19 +264,7 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO targets(prober, name, state, since) VALUES(?,?,'UNKNOWN',0)
-			ON CONFLICT(prober, name) DO NOTHING`, b.Prober.Name, r.Target,
-		); err != nil {
-			return 0, fmt.Errorf("ensure target %q: %w", r.Target, err)
-		}
-		state := model.NormalizeState(r.State)
-		// `since <= ?` keeps an out-of-order (older) result from moving the
-		// transition time backwards.
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE targets SET state=?, since=? WHERE prober=? AND name=? AND state<>? AND since<=?`,
-			state, r.At.UnixNano(), b.Prober.Name, r.Target, state, r.At.UnixNano(),
-		); err != nil {
+		if err := recordSQLite(ctx, tx, b.Prober.Name, r); err != nil {
 			return 0, fmt.Errorf("update state for %q: %w", r.Target, err)
 		}
 	}
@@ -220,6 +276,82 @@ func (s *sqliteStore) Ingest(ctx context.Context, b model.Batch, receivedAt time
 		return stored, err
 	}
 	return stored, nil
+}
+
+func reconcileSQLite(ctx context.Context, tx *sql.Tx, b model.Batch) error {
+	order := declarationOrder(b)
+	accepted, err := tx.ExecContext(ctx, `UPDATE probers SET declared=1, config_hash=?, inventory_versioned=?, inventory_order=?
+		WHERE name=? AND (inventory_order IS NULL OR (?,?) > (inventory_versioned,inventory_order))`,
+		b.ConfigHash, order.versioned, order.value, b.Prober.Name, order.versioned, order.value)
+	if err != nil {
+		return fmt.Errorf("order inventory: %w", err)
+	}
+	n, err := accepted.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE targets SET active=0 WHERE prober=?`, b.Prober.Name); err != nil {
+		return fmt.Errorf("reconcile active targets: %w", err)
+	}
+	for _, spec := range b.Targets {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO targets(prober, name, grp, typ, state, since) VALUES(?,?,?,?,'UNKNOWN',0)
+			ON CONFLICT(prober, name) DO UPDATE SET grp=excluded.grp, typ=excluded.typ, active=1`,
+			b.Prober.Name, spec.Name, spec.Group, spec.Type,
+		); err != nil {
+			return fmt.Errorf("upsert target %q: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
+// Read just the summary on ordinary writes. A late transition inside the
+// current run needs one additional successor seek on the results primary key.
+func recordSQLite(ctx context.Context, tx *sql.Tx, prober string, r model.Result) error {
+	var run stateRun
+	var latest, boundary sql.NullInt64
+	var since int64
+	err := tx.QueryRowContext(ctx, `SELECT state, since, latest_at, before_run FROM targets WHERE prober=? AND name=?`, prober, r.Target).Scan(&run.state, &since, &latest, &boundary)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if latest.Valid {
+		run.latest, run.since = time.Unix(0, latest.Int64), time.Unix(0, since)
+	}
+	if boundary.Valid {
+		run.beforeRun = time.Unix(0, boundary.Int64)
+	}
+	state := model.NormalizeState(r.State)
+	var next time.Time
+	if state != run.state && r.At.After(run.since) && r.At.Before(run.latest) {
+		var at sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT MIN(at) FROM results WHERE prober=? AND target=? AND at>?`, prober, r.Target, r.At.UnixNano()).Scan(&at); err != nil {
+			return err
+		}
+		if at.Valid {
+			next = time.Unix(0, at.Int64)
+		}
+	}
+	previous := run
+	run.record(state, r.At, next)
+	if run == previous {
+		return nil
+	}
+	var before any
+	if !run.beforeRun.IsZero() {
+		before = run.beforeRun.UnixNano()
+	}
+	// Results never change an existing target's membership. For a new name,
+	// infer membership only if the prober has never supplied a target list.
+	_, err = tx.ExecContext(ctx, `INSERT INTO targets(prober,name,state,since,latest_at,before_run,active)
+		SELECT name,?,?,?,?,?, NOT declared FROM probers WHERE name=?
+		ON CONFLICT(prober,name) DO UPDATE SET state=excluded.state, since=excluded.since,
+			latest_at=excluded.latest_at, before_run=excluded.before_run`,
+		r.Target, run.state, run.since.UnixNano(), run.latest.UnixNano(), before, prober)
+	return err
 }
 
 // pruneLocked drops expired rows at most once a minute.
@@ -247,11 +379,13 @@ func (s *sqliteStore) pruneLocked(ctx context.Context, now time.Time) error {
 }
 
 func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
+	s.mu.Lock() // keep inventory, counts and samples from the same ingest
+	defer s.mu.Unlock()
 	var (
 		snap     Snapshot
 		probers  []ProberState
 		targets  []TargetState
-		targetOf = make(map[string]int) // target name -> index in targets
+		targetOf = make(map[targetKey]int)
 	)
 
 	// Probers.
@@ -282,22 +416,24 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 	_ = rows.Close()
 
 	// Targets.
-	rows, err = s.db.QueryContext(ctx, `SELECT prober, name, grp, typ, state, since FROM targets ORDER BY name`)
+	rows, err = s.db.QueryContext(ctx, `SELECT prober, name, grp, typ, state, CASE WHEN latest_at IS NOT NULL THEN since END FROM targets WHERE active=1`)
 	if err != nil {
 		return snap, fmt.Errorf("query targets: %w", err)
 	}
 	for rows.Next() {
 		var (
 			t     TargetState
-			since int64
+			since sql.NullInt64
 		)
 		if err := rows.Scan(&t.Prober, &t.Spec.Name, &t.Spec.Group, &t.Spec.Type, &t.State, &since); err != nil {
 			_ = rows.Close()
 			return snap, err
 		}
-		t.Since = unixOrZero(since)
+		if since.Valid {
+			t.Since = time.Unix(0, since.Int64).UTC()
+		}
 		t.Uptime = make(map[string]float64, len(UptimeWindows))
-		targetOf[t.Spec.Name] = len(targets)
+		targetOf[targetKey{t.Prober, t.Spec.Name}] = len(targets)
 		targets = append(targets, t)
 	}
 	if err := rows.Err(); err != nil {
@@ -306,30 +442,29 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	_ = rows.Close()
 
-	// Latest result per target (window function; SQLite >= 3.25).
+	// Join on the watermark, not the newest surviving raw row: an older
+	// backlog sample may arrive after the latest result has been pruned.
 	rows, err = s.db.QueryContext(ctx, `
-		SELECT target, at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json, maintenance
-		FROM (
-			SELECT *, ROW_NUMBER() OVER (PARTITION BY target ORDER BY at DESC) AS rn
-			FROM results
-		) WHERE rn = 1`)
+		SELECT r.prober, target, at, ok, r.state, duration_ms, status_code, error_class, error, tls_expiry, phase_json, maintenance
+		FROM targets AS t JOIN results AS r ON r.prober=t.prober AND r.target=t.name AND r.at=t.latest_at
+		WHERE t.active=1`)
 	if err != nil {
 		return snap, fmt.Errorf("query last results: %w", err)
 	}
 	for rows.Next() {
 		var (
-			target    string
+			key       targetKey
 			r         model.Result
 			at, tls   int64
 			ok, maint int
 			phases    string
 		)
-		if err := rows.Scan(&target, &at, &ok, &r.State, &r.DurationMS, &r.StatusCode,
+		if err := rows.Scan(&key.prober, &key.name, &at, &ok, &r.State, &r.DurationMS, &r.StatusCode,
 			&r.ErrorClass, &r.Error, &tls, &phases, &maint); err != nil {
 			_ = rows.Close()
 			return snap, err
 		}
-		r.Target = target
+		r.Target = key.name
 		r.At = time.Unix(0, at).UTC()
 		r.OK = ok == 1
 		if tls > 0 {
@@ -340,7 +475,7 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 			_ = json.Unmarshal([]byte(phases), &r.PhaseMS)
 		}
 		r.Maintenance = maint == 1
-		if idx, ok := targetOf[target]; ok {
+		if idx, ok := targetOf[key]; ok {
 			targets[idx].Last = r
 			targets[idx].Maintenance = r.Maintenance
 		}
@@ -369,8 +504,7 @@ func (s *sqliteStore) Snapshot(ctx context.Context) (Snapshot, error) {
 
 	snap.Probers = probers
 	snap.Targets = targets
-	sortProbers(snap.Probers)
-	sortTargets(snap.Targets)
+	snap.finish()
 	return snap, nil
 }
 
@@ -380,10 +514,10 @@ func (s *sqliteStore) fillUptime(
 	window time.Duration,
 	names []string,
 	targets []TargetState,
-	targetOf map[string]int,
+	targetOf map[targetKey]int,
 ) error {
 	cutoff := time.Now().Add(-window).Unix()
-	query := "SELECT target, SUM(ok), SUM(total) FROM " + table + " WHERE bucket >= ? GROUP BY target"
+	query := "SELECT prober,target, SUM(ok), SUM(total) FROM " + table + " WHERE bucket >= ? GROUP BY prober,target"
 
 	rows, err := s.db.QueryContext(ctx, query, cutoff)
 	if err != nil {
@@ -393,13 +527,13 @@ func (s *sqliteStore) fillUptime(
 
 	for rows.Next() {
 		var (
-			target    string
+			key       targetKey
 			ok, total int64
 		)
-		if err := rows.Scan(&target, &ok, &total); err != nil {
+		if err := rows.Scan(&key.prober, &key.name, &ok, &total); err != nil {
 			return err
 		}
-		idx, known := targetOf[target]
+		idx, known := targetOf[key]
 		if !known {
 			continue
 		}
@@ -414,44 +548,57 @@ func (s *sqliteStore) fillUptime(
 	return rows.Err()
 }
 
-func (s *sqliteStore) fillLatency(ctx context.Context, targets []TargetState, targetOf map[string]int) error {
+func (s *sqliteStore) fillLatency(ctx context.Context, targets []TargetState, targetOf map[targetKey]int) error {
 	cutoff := time.Now().Add(-LatencyWindow).UnixNano()
 	rows, err := s.db.QueryContext(ctx,
 		// ok = 1 only: a failed probe's duration says nothing about latency, and a
 		// refused connection records 0 ms, which would read as "very fast".
-		`SELECT target, duration_ms FROM results WHERE at >= ? AND ok = 1 ORDER BY target, at`, cutoff)
+		`SELECT prober,target, duration_ms FROM results WHERE at >= ? AND ok = 1`, cutoff)
 	if err != nil {
 		return fmt.Errorf("query latency: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	buckets := make(map[string][]int64, len(targets))
+	buckets := make(map[targetKey][]int64, len(targets))
 	for rows.Next() {
 		var (
-			target   string
+			key      targetKey
 			duration int64
 		)
-		if err := rows.Scan(&target, &duration); err != nil {
+		if err := rows.Scan(&key.prober, &key.name, &duration); err != nil {
 			return err
 		}
-		buckets[target] = append(buckets[target], duration)
+		buckets[key] = append(buckets[key], duration)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for target, durations := range buckets {
-		if idx, ok := targetOf[target]; ok {
+	for key, durations := range buckets {
+		if idx, ok := targetOf[key]; ok {
 			targets[idx].Latency = Percentiles(durations)
 		}
 	}
 	return nil
 }
 
-func (s *sqliteStore) History(ctx context.Context, target string, from time.Time) ([]model.Result, error) {
+func (s *sqliteStore) History(ctx context.Context, prober, target string, from time.Time) ([]model.Result, error) {
+	if prober == "" {
+		var owners int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(prober),'') FROM targets WHERE name=?`, target).Scan(&owners, &prober); err != nil {
+			return nil, err
+		}
+		if owners > 1 {
+			return nil, ErrAmbiguousTarget
+		}
+		if owners == 0 {
+			return nil, nil
+		}
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT at, ok, state, duration_ms, status_code, error_class, error, tls_expiry, phase_json, maintenance
-		FROM results WHERE target = ? AND at >= ? ORDER BY at`,
-		target, from.UnixNano())
+		FROM results WHERE prober=? AND target = ? AND at >= ? ORDER BY at`,
+		prober, target, from.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("query history: %w", err)
 	}
@@ -492,11 +639,4 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-func unixOrZero(nanos int64) time.Time {
-	if nanos == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, nanos).UTC()
 }

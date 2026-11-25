@@ -35,23 +35,26 @@ type Buckets struct {
 // New returns an empty bucket set.
 func New() *Buckets { return &Buckets{} }
 
-// Record adds one probe outcome to the current minute and hour buckets.
+// Record adds one probe outcome to the minute and hour buckets containing at.
 func (b *Buckets) Record(ok bool, at time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.advance(at)
 
-	c := &b.minutes[b.minIdx]
+	// A delayed push belongs to its original bucket, not the newest one.
+	recordAt(b.minutes[:], b.minIdx, int(b.minStart.Sub(at.Truncate(time.Minute))/time.Minute), ok)
+	recordAt(b.hours[:], b.hourIdx, int(b.hourStart.Sub(at.Truncate(time.Hour))/time.Hour), ok)
+}
+
+func recordAt(ring []counter, newest, age int, ok bool) {
+	if age >= len(ring) {
+		return // the bucket has already rolled off
+	}
+	c := &ring[(newest-age+len(ring))%len(ring)]
 	c.total++
 	if ok {
 		c.ok++
-	}
-
-	h := &b.hours[b.hourIdx]
-	h.total++
-	if ok {
-		h.ok++
 	}
 }
 
