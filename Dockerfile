@@ -8,7 +8,7 @@ ARG ROLE=prober
 ARG TARGETOS=linux
 ARG TARGETARCH
 # Release version, stamped into the binary and reported at startup and by /metrics.
-ARG VERSION=0.1.1-dev
+ARG VERSION=0.1.2-dev
 
 WORKDIR /src
 COPY go.mod go.sum ./

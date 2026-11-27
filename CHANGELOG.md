@@ -2,6 +2,14 @@
 
 Notable changes, newest first. This project follows [semantic versioning](https://semver.org/).
 
+## 0.1.2 — 2026-11-27
+
+- Idle probers send authenticated heartbeats so slow probe schedules keep accurate prober health without adding history samples.
+- Upgrade the viewer before the probers. Earlier viewers reject heartbeats with empty result sets.
+- Reloading probe configuration publishes the accepted inventory and its hash together. Changes to startup-only settings require a restart and reject the entire reload.
+- Dashboard polling coalesces overlapping refreshes so slow status responses can render.
+- The viewer rejects a configured read password or password hash when the username is missing.
+
 ## 0.1.1 — 2026-11-25
 
 - Target status, charts and history now distinguish probers monitoring the same target
