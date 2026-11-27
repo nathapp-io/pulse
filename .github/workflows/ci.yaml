@@ -39,6 +39,9 @@ jobs:
       - name: tests (race)
         run: go test -race -count=1 ./...
 
+      - name: dashboard refresh regression
+        run: node --test internal/ui/refresh.test.cjs
+
       - name: binaries build
         run: |
           CGO_ENABLED=0 go build -trimpath -o /tmp/pulse-prober ./cmd/prober

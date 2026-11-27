@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +155,29 @@ func TestInMaintenanceWindow(t *testing.T) {
 	}
 	if p.InMaintenance(time.Unix(2500, 0)) {
 		t.Fatal("time after the window counted as maintenance")
+	}
+}
+
+func TestPrepareReloadRejectsMixedEdits(t *testing.T) {
+	startup := parseConfig(t, proberConfig)
+	originalHash := startup.SourceHash
+	current, err := buildTargets(startup, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := parseConfig(t, strings.Replace(proberConfig, "name: a", "name: b", 1))
+	next.Viewer.URL = "https://viewer.example"
+	next.Prober.Name = "other"
+	replacement, err := prepareReload(startup, next, current)
+	if err == nil || !strings.Contains(err.Error(), "viewer.url") || !strings.Contains(err.Error(), "prober.name") || replacement != nil {
+		t.Fatalf("expected restart-only fields, got %v", err)
+	}
+	if current["a"] == nil || current["b"] != nil || startup.SourceHash != originalHash {
+		t.Fatal("rejected reload changed accepted configuration")
+	}
+	next.Viewer, next.Prober = startup.Viewer, startup.Prober
+	replacement, err = prepareReload(startup, next, current)
+	if err != nil || replacement["b"] == nil || replacement["a"] != nil {
+		t.Fatalf("target-only reload failed: %v", err)
 	}
 }

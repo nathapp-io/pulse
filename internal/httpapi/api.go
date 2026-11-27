@@ -42,6 +42,9 @@ func (c Config) Validate() error {
 	if c.Ingest == nil {
 		errs = append(errs, errors.New("no ingest tokens configured: an open ingest endpoint accepts fabricated history"))
 	}
+	if c.AuthUser == "" && (c.AuthPassword != "" || c.AuthPasswordHash != "") {
+		errs = append(errs, errors.New("PULSE_AUTH_USER is required when a read password or password hash is configured"))
+	}
 	if c.AuthUser != "" && c.AuthPassword == "" && c.AuthPasswordHash == "" {
 		errs = append(errs, errors.New("PULSE_AUTH_USER is set but neither PULSE_AUTH_PASSWORD nor PULSE_AUTH_PASSWORD_HASH is"))
 	}

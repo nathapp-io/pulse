@@ -10,6 +10,7 @@
   let targets = [];
   let selected = null;
   let chartFetchedAt = 0;
+  let refreshing = false;
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -236,6 +237,8 @@
   }
 
   async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
     try {
       const status = await api("/api/v1/status");
       banner("");
@@ -249,10 +252,12 @@
         $("#detail").hidden = true;
         destroyChart();
       } else if (selected && Date.now() - chartFetchedAt > CHART_REFRESH_MS) {
-        await selectTarget(selected.prober, selected.name);
+        void selectTarget(selected.prober, selected.name);
       }
     } catch (err) {
       banner(err.message);
+    } finally {
+      refreshing = false;
     }
   }
 

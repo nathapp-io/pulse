@@ -512,3 +512,28 @@ func TestNoSuccessfulProbeMeansNoLatency(t *testing.T) {
 		}
 	})
 }
+
+func TestHeartbeatUpdatesLastSeenWithoutAddingHistory(t *testing.T) {
+	forEachBackend(t, nil, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		now := time.Now().UTC()
+		b := batchOf("p", []model.TargetSpec{{Name: "api"}}, result("api", now, true, "UP", 10))
+		b.InventoryRevision = 1
+		if _, err := st.Ingest(ctx, b, now); err != nil {
+			t.Fatal(err)
+		}
+		b.InventoryRevision++
+		b.Results = nil
+		later := now.Add(20 * time.Second)
+		if count, err := st.Ingest(ctx, b, later); err != nil || count != 0 {
+			t.Fatalf("heartbeat stored %d: %v", count, err)
+		}
+		snap, err := st.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Probers) != 1 || !snap.Probers[0].LastSeen.Equal(later) || len(snap.Targets) != 1 || !snap.Targets[0].Last.At.Equal(now) {
+			t.Fatalf("unexpected snapshot after heartbeat: %+v", snap)
+		}
+	})
+}

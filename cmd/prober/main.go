@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -77,18 +75,19 @@ func main() {
 	defer stop()
 
 	var (
-		mu      sync.RWMutex
-		current = targets
+		mu          sync.RWMutex
+		current     = targets
+		currentHash = cfg.SourceHash
 	)
 
-	targetsSpec := func() []model.TargetSpec {
+	inventory := func() ([]model.TargetSpec, string) {
 		mu.RLock()
 		defer mu.RUnlock()
 		out := make([]model.TargetSpec, 0, len(current))
 		for name, rt := range current {
 			out = append(out, model.TargetSpec{Name: name, Group: rt.cfg.Group, Type: rt.cfg.Type})
 		}
-		return out
+		return out, currentHash
 	}
 
 	var (
@@ -112,8 +111,7 @@ func main() {
 			ProberName:         cfg.Prober.Name,
 			ProberVersion:      build.Version,
 			Labels:             cfg.Prober.Labels,
-			ConfigHash:         configHash(*configPath),
-			Targets:            targetsSpec,
+			Inventory:          inventory,
 		}, m)
 		if err != nil {
 			logger.Error("cannot start the push client", "error", err)
@@ -198,7 +196,7 @@ func main() {
 		}
 	}()
 
-	go reloadOnHUP(*configPath, logger, runner, ctx, &mu, &current, handle)
+	go reloadOnHUP(*configPath, cfg, logger, runner, ctx, &mu, &current, &currentHash, handle)
 
 	<-ctx.Done()
 	logger.Info("shutting down")
@@ -220,11 +218,13 @@ func main() {
 // leaves the running configuration untouched.
 func reloadOnHUP(
 	path string,
+	startup *config.File,
 	logger *slog.Logger,
 	runner *schedule.Runner,
 	ctx context.Context,
 	mu *sync.RWMutex,
 	current *map[string]*targetRuntime,
+	currentHash *string,
 	handle schedule.Handler,
 ) {
 	hup := make(chan os.Signal, 1)
@@ -246,7 +246,7 @@ func reloadOnHUP(
 			previous := *current
 			mu.RUnlock()
 
-			newTargets, err := buildTargets(newCfg, previous)
+			newTargets, err := prepareReload(startup, newCfg, previous)
 			if err != nil {
 				logger.Error("reload rejected, keeping the running configuration", "error", err)
 				continue
@@ -255,11 +255,35 @@ func reloadOnHUP(
 			runner.Stop()
 			mu.Lock()
 			*current = newTargets
+			*currentHash = newCfg.SourceHash
 			mu.Unlock()
 			runner.Start(ctx, toSchedule(newTargets), handle)
 			logger.Info("configuration reloaded", "targets", len(newTargets))
 		}
 	}
+}
+
+// prepareReload validates startup-only settings before constructing replacement workers.
+func prepareReload(startup, next *config.File, previous map[string]*targetRuntime) (map[string]*targetRuntime, error) {
+	var changed []string
+	for _, section := range []struct {
+		name          string
+		before, after any
+	}{
+		{"prober", startup.Prober, next.Prober},
+		{"viewer", startup.Viewer, next.Viewer},
+	} {
+		before, after := reflect.ValueOf(section.before), reflect.ValueOf(section.after)
+		for i := 0; i < before.NumField(); i++ {
+			if !reflect.DeepEqual(before.Field(i).Interface(), after.Field(i).Interface()) {
+				changed = append(changed, section.name+"."+before.Type().Field(i).Tag.Get("yaml"))
+			}
+		}
+	}
+	if len(changed) > 0 {
+		return nil, fmt.Errorf("restart required to change %s", strings.Join(changed, ", "))
+	}
+	return buildTargets(next, previous)
 }
 
 // buildTargets builds the runtime for every configured target, reusing the
@@ -309,17 +333,6 @@ func metricsMux(m *metrics.Metrics) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	return mux
-}
-
-// configHash identifies the configuration to the viewer without shipping it, so a
-// changed target set is visible there.
-func configHash(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:8])
 }
 
 // toModelResult converts an internal probe result into the wire format, carrying
