@@ -257,3 +257,5 @@ survives a reinstall. Delete it explicitly when you mean it.
 | `summary.probers_missing > 0` | a declared prober never reported |
 
 Idle probers send an authenticated inventory heartbeat every push interval. Upgrade the viewer before the probers so it accepts heartbeats with zero results. Keep the push interval below `PULSE_STALE_AFTER` with room for network delays.
+
+SIGHUP applies changes to probes and their defaults. Changes to any `prober` or `viewer` setting require a prober restart. A mixed edit is rejected in full, and the log names the settings that require a restart.

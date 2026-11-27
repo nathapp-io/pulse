@@ -10,7 +10,7 @@
   let targets = [];
   let selected = null;
   let chartFetchedAt = 0;
-  let refreshSequence = 0;
+  let refreshing = false;
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -237,10 +237,10 @@
   }
 
   async function refresh() {
-    const sequence = ++refreshSequence;
+    if (refreshing) return;
+    refreshing = true;
     try {
       const status = await api("/api/v1/status");
-      if (sequence !== refreshSequence) return;
       banner("");
       renderSummary(status);
       renderProbers(status.probers || []);
@@ -252,10 +252,12 @@
         $("#detail").hidden = true;
         destroyChart();
       } else if (selected && Date.now() - chartFetchedAt > CHART_REFRESH_MS) {
-        await selectTarget(selected.prober, selected.name);
+        void selectTarget(selected.prober, selected.name);
       }
     } catch (err) {
-      if (sequence === refreshSequence) banner(err.message);
+      banner(err.message);
+    } finally {
+      refreshing = false;
     }
   }
 

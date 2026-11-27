@@ -5,8 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-test("late status response cannot replace a newer dashboard", async () => {
+test("a slow status request survives overlapping timer and manual refreshes", async () => {
   const pending = [];
+  let tick;
   const nodes = new Map();
   const document = {
     addEventListener() {},
@@ -19,17 +20,23 @@ test("late status response cannot replace a newer dashboard", async () => {
   };
   const script = fs.readFileSync(path.join(__dirname, "static/app.js"), "utf8");
   vm.runInNewContext(script, {
-    document, window: { addEventListener() {} }, setInterval() {},
+    document, window: { addEventListener() {} }, setInterval(fn) { tick = fn; },
     fetch: () => new Promise(resolve => pending.push(resolve)),
   });
-  const manual = document.querySelector("#refresh").click();
   function status(name) {
     return { ok: true, json: async () => ({ targets: [{ name, prober: "p" }] }) };
   }
-  pending[1](status("new-target"));
-  await manual;
-  pending[0](status("old-target"));
+  tick();
+  await document.querySelector("#refresh").click();
+  tick();
+  assert.equal(pending.length, 1);
+  pending[0](status("first-target"));
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(document.querySelector("#targets").innerHTML, /new-target/);
-  assert.doesNotMatch(document.querySelector("#targets").innerHTML, /old-target/);
+  assert.match(document.querySelector("#targets").innerHTML, /first-target/);
+
+  const manual = document.querySelector("#refresh").click();
+  assert.equal(pending.length, 2);
+  pending[1](status("next-target"));
+  await manual;
+  assert.match(document.querySelector("#targets").innerHTML, /next-target/);
 });

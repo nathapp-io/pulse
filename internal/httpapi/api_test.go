@@ -291,6 +291,8 @@ func TestConfigValidate(t *testing.T) {
 		wantErr bool
 	}{
 		"missing token":      {Config{}, true},
+		"pass without user":  {Config{Ingest: auth, AuthPassword: "p"}, true},
+		"hash without user":  {Config{Ingest: auth, AuthPasswordHash: "h"}, true},
 		"user without pass":  {Config{Ingest: auth, AuthUser: "u"}, true},
 		"both pass and hash": {Config{Ingest: auth, AuthUser: "u", AuthPassword: "p", AuthPasswordHash: "h"}, true},
 		"plain password":     {Config{Ingest: auth, AuthUser: "u", AuthPassword: "p"}, false},
