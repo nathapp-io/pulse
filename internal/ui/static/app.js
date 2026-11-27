@@ -10,6 +10,7 @@
   let targets = [];
   let selected = null;
   let chartFetchedAt = 0;
+  let refreshSequence = 0;
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -236,8 +237,10 @@
   }
 
   async function refresh() {
+    const sequence = ++refreshSequence;
     try {
       const status = await api("/api/v1/status");
+      if (sequence !== refreshSequence) return;
       banner("");
       renderSummary(status);
       renderProbers(status.probers || []);
@@ -252,7 +255,7 @@
         await selectTarget(selected.prober, selected.name);
       }
     } catch (err) {
-      banner(err.message);
+      if (sequence === refreshSequence) banner(err.message);
     }
   }
 

@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -77,18 +75,19 @@ func main() {
 	defer stop()
 
 	var (
-		mu      sync.RWMutex
-		current = targets
+		mu          sync.RWMutex
+		current     = targets
+		currentHash = cfg.SourceHash
 	)
 
-	targetsSpec := func() []model.TargetSpec {
+	inventory := func() ([]model.TargetSpec, string) {
 		mu.RLock()
 		defer mu.RUnlock()
 		out := make([]model.TargetSpec, 0, len(current))
 		for name, rt := range current {
 			out = append(out, model.TargetSpec{Name: name, Group: rt.cfg.Group, Type: rt.cfg.Type})
 		}
-		return out
+		return out, currentHash
 	}
 
 	var (
@@ -112,8 +111,7 @@ func main() {
 			ProberName:         cfg.Prober.Name,
 			ProberVersion:      build.Version,
 			Labels:             cfg.Prober.Labels,
-			ConfigHash:         configHash(*configPath),
-			Targets:            targetsSpec,
+			Inventory:          inventory,
 		}, m)
 		if err != nil {
 			logger.Error("cannot start the push client", "error", err)
@@ -198,7 +196,7 @@ func main() {
 		}
 	}()
 
-	go reloadOnHUP(*configPath, logger, runner, ctx, &mu, &current, handle)
+	go reloadOnHUP(*configPath, logger, runner, ctx, &mu, &current, &currentHash, handle)
 
 	<-ctx.Done()
 	logger.Info("shutting down")
@@ -225,6 +223,7 @@ func reloadOnHUP(
 	ctx context.Context,
 	mu *sync.RWMutex,
 	current *map[string]*targetRuntime,
+	currentHash *string,
 	handle schedule.Handler,
 ) {
 	hup := make(chan os.Signal, 1)
@@ -255,6 +254,7 @@ func reloadOnHUP(
 			runner.Stop()
 			mu.Lock()
 			*current = newTargets
+			*currentHash = newCfg.SourceHash
 			mu.Unlock()
 			runner.Start(ctx, toSchedule(newTargets), handle)
 			logger.Info("configuration reloaded", "targets", len(newTargets))
@@ -309,17 +309,6 @@ func metricsMux(m *metrics.Metrics) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	return mux
-}
-
-// configHash identifies the configuration to the viewer without shipping it, so a
-// changed target set is visible there.
-func configHash(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:8])
 }
 
 // toModelResult converts an internal probe result into the wire format, carrying

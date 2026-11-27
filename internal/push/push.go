@@ -54,10 +54,8 @@ type Config struct {
 	ProberName    string
 	ProberVersion string
 	Labels        map[string]string
-	ConfigHash    string
-	// Targets returns the current target list, so the viewer learns about
-	// targets that exist before their first result and after a reload.
-	Targets func() []model.TargetSpec
+	// Inventory snapshots the accepted targets and config hash together.
+	Inventory func() ([]model.TargetSpec, string)
 }
 
 type entry struct {
@@ -257,7 +255,7 @@ func (c *Client) flush(ctx context.Context) error {
 	if n > c.cfg.MaxBatch {
 		n = c.cfg.MaxBatch
 	}
-	if n == 0 {
+	if n == 0 && c.cfg.Inventory == nil {
 		c.mu.Unlock()
 		return nil
 	}
@@ -271,11 +269,10 @@ func (c *Client) flush(ctx context.Context) error {
 			Version: c.cfg.ProberVersion,
 			Labels:  c.cfg.Labels,
 		},
-		ConfigHash: c.cfg.ConfigHash,
-		Results:    make([]model.Result, 0, len(batch)),
+		Results: make([]model.Result, 0, len(batch)),
 	}
-	if c.cfg.Targets != nil {
-		payload.Targets = c.cfg.Targets()
+	if c.cfg.Inventory != nil {
+		payload.Targets, payload.ConfigHash = c.cfg.Inventory()
 		if payload.Targets != nil {
 			// Stamp the declaration, not the queued measurements: after a reload
 			// a fresh target list can travel with hours-old samples. Wall time
@@ -293,6 +290,9 @@ func (c *Client) flush(ctx context.Context) error {
 		payload.Results = append(payload.Results, e.r)
 	}
 
+	if len(batch) == 0 && payload.Targets == nil {
+		return nil
+	}
 	if err := c.post(ctx, payload); err != nil {
 		c.obs.PushFailed()
 		return err
@@ -300,6 +300,10 @@ func (c *Client) flush(ctx context.Context) error {
 
 	// Remove what was sent. Entries added while the request was in flight have a
 	// higher sequence number and are kept.
+	if len(batch) == 0 {
+		c.obs.PushSucceeded(c.now())
+		return nil
+	}
 	lastSent := batch[len(batch)-1].seq
 	c.mu.Lock()
 	kept := c.queue[:0]

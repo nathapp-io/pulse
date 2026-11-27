@@ -72,8 +72,8 @@ func (b Batch) Validate() error {
 	if b.InventoryRevision < 0 || (b.InventoryRevision != 0 && b.Targets == nil) {
 		errs = append(errs, errors.New("inventory_revision must be positive and accompany a targets list when used"))
 	}
-	if len(b.Results) == 0 {
-		errs = append(errs, errors.New("results must not be empty"))
+	if len(b.Results) == 0 && b.InventoryRevision <= 0 {
+		errs = append(errs, errors.New("empty results require a versioned inventory declaration"))
 	}
 	if len(b.Results) > MaxBatchResults {
 		errs = append(errs, fmt.Errorf("results must not exceed %d per batch", MaxBatchResults))

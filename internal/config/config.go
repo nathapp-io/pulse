@@ -7,6 +7,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -43,10 +45,11 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 
 // File is the whole prober configuration.
 type File struct {
-	Prober   Prober   `yaml:"prober"`
-	Viewer   Viewer   `yaml:"viewer"`
-	Defaults Defaults `yaml:"defaults"`
-	Probes   []Probe  `yaml:"probes"`
+	SourceHash string   `yaml:"-"` // Hash of the validated source bytes.
+	Prober     Prober   `yaml:"prober"`
+	Viewer     Viewer   `yaml:"viewer"`
+	Defaults   Defaults `yaml:"defaults"`
+	Probes     []Probe  `yaml:"probes"`
 }
 
 // Prober describes the prober process itself.
@@ -145,6 +148,8 @@ func Parse(b []byte) (*File, error) {
 	if err := f.Validate(); err != nil {
 		return nil, err
 	}
+	sum := sha256.Sum256(b)
+	f.SourceHash = hex.EncodeToString(sum[:8])
 	return &f, nil
 }
 

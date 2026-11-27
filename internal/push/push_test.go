@@ -102,8 +102,8 @@ func newClient(t *testing.T, url string, obs Observer, mutate func(*Config)) *Cl
 		MaxBackoff:    40 * time.Millisecond,
 		ProberName:    "prober-a",
 		ProberVersion: "test",
-		Targets: func() []model.TargetSpec {
-			return []model.TargetSpec{{Name: "api", Group: "web", Type: "http"}}
+		Inventory: func() ([]model.TargetSpec, string) {
+			return []model.TargetSpec{{Name: "api", Group: "web", Type: "http"}}, "hash"
 		},
 	}
 	if mutate != nil {
@@ -171,8 +171,9 @@ func TestInventoryRevisionFollowsSnapshotNotMeasurementTime(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(rec.handler())
 	defer srv.Close()
+	hash := "old-config"
 	inventory := []model.TargetSpec{{Name: "old"}}
-	c := newClient(t, srv.URL, nil, func(cfg *Config) { cfg.Targets = func() []model.TargetSpec { return inventory } })
+	c := newClient(t, srv.URL, nil, func(cfg *Config) { cfg.Inventory = func() ([]model.TargetSpec, string) { return inventory, hash } })
 	now := time.Now().UTC()
 	c.now = func() time.Time { return now }
 	flush := func(at time.Time) {
@@ -185,6 +186,7 @@ func TestInventoryRevisionFollowsSnapshotNotMeasurementTime(t *testing.T) {
 	flush(now)
 	// The newly loaded inventory is attached to older backlog while wall time
 	// moves backwards. It must still supersede the preceding declaration.
+	hash = "new-config"
 	inventory = []model.TargetSpec{{Name: "new"}}
 	now = now.Add(-time.Second)
 	flush(now.Add(-time.Hour))
@@ -193,6 +195,9 @@ func TestInventoryRevisionFollowsSnapshotNotMeasurementTime(t *testing.T) {
 	got := rec.all()
 	if len(got) != 3 {
 		t.Fatalf("got %d batches, want 3", len(got))
+	}
+	if got[0].ConfigHash != "old-config" || got[1].ConfigHash != "new-config" {
+		t.Fatalf("configuration hashes: %q, %q", got[0].ConfigHash, got[1].ConfigHash)
 	}
 	if got[0].InventoryRevision <= 0 || got[1].InventoryRevision <= got[0].InventoryRevision || got[1].Targets[0].Name != "new" || got[2].InventoryRevision != 0 {
 		t.Errorf("wrong inventory revisions: %d %d %d", got[0].InventoryRevision, got[1].InventoryRevision, got[2].InventoryRevision)
@@ -340,6 +345,23 @@ func TestNewValidates(t *testing.T) {
 		mutate(&cfg)
 		if _, err := New(cfg, nil); err == nil {
 			t.Fatalf("%s: New accepted an invalid config", name)
+		}
+	}
+}
+
+func TestIdlePushSendsHeartbeat(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.handler())
+	defer srv.Close()
+	c := newClient(t, srv.URL, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "two idle heartbeats", func() bool { return rec.count() >= 2 })
+	for _, b := range rec.all() {
+		if err := b.Validate(); err != nil || len(b.Results) != 0 || b.InventoryRevision <= 0 {
+			t.Fatalf("invalid heartbeat: %+v, %v", b, err)
 		}
 	}
 }
